@@ -8,7 +8,11 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
-import instaloader
+try:
+    import instaloader
+except ImportError:
+    instaloader = None
+
 import yt_dlp
 import uvicorn
 
@@ -71,12 +75,17 @@ DESKTOP_HEADERS = {
 # INSTALOADER
 # =========================================================
 
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    user_agent=DESKTOP_HEADERS["User-Agent"]
-)
+L = None
+if instaloader:
+    try:
+        L = instaloader.Instaloader(
+            download_pictures=False,
+            download_videos=False,
+            download_video_thumbnails=False,
+            user_agent=DESKTOP_HEADERS["User-Agent"]
+        )
+    except Exception:
+        L = None
 
 
 # =========================================================
@@ -330,78 +339,79 @@ def extract_instagram_all_slides(url: str):
 
     media_items = []
 
-    try:
+    if L and instaloader:
+        try:
 
-        shortcode = None
+            shortcode = None
 
-        for tag in [
-            "/p/",
-            "/reel/",
-            "/reels/"
-        ]:
+            for tag in [
+                "/p/",
+                "/reel/",
+                "/reels/"
+            ]:
 
-            if tag in url:
+                if tag in url:
 
-                shortcode = (
-                    url.split(tag)[1]
-                    .split("/")[0]
-                    .split("?")[0]
+                    shortcode = (
+                        url.split(tag)[1]
+                        .split("/")[0]
+                        .split("?")[0]
+                    )
+
+                    break
+
+            if shortcode:
+
+                post = instaloader.Post.from_shortcode(
+                    L.context,
+                    shortcode
                 )
 
-                break
+                if post.typename == "GraphSidecar":
 
-        if shortcode:
+                    for node in post.get_sidecar_nodes():
 
-            post = instaloader.Post.from_shortcode(
-                L.context,
-                shortcode
+                        if node.is_video and node.video_url:
+
+                            media_items.append({
+                                "url": node.video_url,
+                                "type": "mp4",
+                                "thumbnail": node.display_url or post.url
+                            })
+
+                        elif node.display_url:
+
+                            media_items.append({
+                                "url": node.display_url,
+                                "type": "jpg",
+                                "thumbnail": node.display_url
+                            })
+
+                elif post.is_video and post.video_url:
+
+                    media_items.append({
+                        "url": post.video_url,
+                        "type": "mp4",
+                        "thumbnail": post.url
+                    })
+
+                elif post.url:
+
+                    media_items.append({
+                        "url": post.url,
+                        "type": "jpg",
+                        "thumbnail": post.url
+                    })
+
+                if media_items:
+                    return media_items
+
+        except Exception as e:
+
+            print(
+                "Instagram error:",
+                repr(e)
             )
-
-            if post.typename == "GraphSidecar":
-
-                for node in post.get_sidecar_nodes():
-
-                    if node.is_video and node.video_url:
-
-                        media_items.append({
-                            "url": node.video_url,
-                            "type": "mp4",
-                            "thumbnail": node.display_url or post.url
-                        })
-
-                    elif node.display_url:
-
-                        media_items.append({
-                            "url": node.display_url,
-                            "type": "jpg",
-                            "thumbnail": node.display_url
-                        })
-
-            elif post.is_video and post.video_url:
-
-                media_items.append({
-                    "url": post.video_url,
-                    "type": "mp4",
-                    "thumbnail": post.url
-                })
-
-            elif post.url:
-
-                media_items.append({
-                    "url": post.url,
-                    "type": "jpg",
-                    "thumbnail": post.url
-                })
-
-            if media_items:
-                return media_items
-
-    except Exception as e:
-
-        print(
-            "Instagram error:",
-            repr(e)
-        )
 
     try:
 
