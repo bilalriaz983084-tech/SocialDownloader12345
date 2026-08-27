@@ -58,16 +58,17 @@ def extract_fb_media(target_url: str):
     except Exception as e:
         print("yt-dlp video extraction fallback:", e)
 
-    # 2. Agar video na mile ya photo/post ho toh requests aur regex se HTML parse karein (Serverless Friendly)
+    # 2. Requests aur mobile headers se HTML parse karein
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5"
         }
         response = requests.get(clean_target_url, headers=headers, timeout=15)
         content = response.text
 
-        # Video patterns check karein HTML mein se agar yt-dlp fail ho jaye
+        # Video patterns check karein
         video_patterns = [
             r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"',
             r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"',
@@ -90,7 +91,7 @@ def extract_fb_media(target_url: str):
         if collected:
             return collected
 
-        # 3. Updated Photos & Image Patterns Extractor
+        # 3. Photos & Image Patterns Extractor
         photo_patterns = [
             r'\"photo_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"',
             r'\"image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"',
@@ -108,7 +109,7 @@ def extract_fb_media(target_url: str):
                         seen_ids.add(uid)
                         collected.append({"url": clean_img, "type": "jpg"})
 
-        # Fallback general scontent search if specific patterns missed
+        # Fallback general scontent search
         if not collected:
             for uri in re.findall(r'\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
                 clean_img = clean_fb_cdn_url(uri)
