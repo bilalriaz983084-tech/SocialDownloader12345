@@ -47,7 +47,6 @@ def extract_fb_media(target_url: str):
             info = ydl.extract_info(clean_target_url, download=False)
             if info:
                 video_url = info.get('url')
-                title = info.get('title', 'Facebook_Video')
                 if video_url:
                     collected.append({
                         "url": video_url,
@@ -58,16 +57,31 @@ def extract_fb_media(target_url: str):
     except Exception as e:
         print("yt-dlp video extraction fallback:", e)
 
-    # 2. Requests aur mobile headers se HTML parse karein
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5"
-        }
-        response = requests.get(clean_target_url, headers=headers, timeout=15)
-        content = response.text
+    # 2. Requests se HTML parse karein (Redirects allow karke aur mbasic version bhi try karke)
+    urls_to_try = [clean_target_url]
+    if "share/p/" in target_url or "share/v/" in target_url:
+        urls_to_try.insert(0, clean_target_url.replace("www.facebook.com", "mbasic.facebook.com"))
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+
+    content = ""
+    for u in urls_to_try:
+        try:
+            resp = requests.get(u, headers=headers, allow_redirects=True, timeout=15)
+            if resp.status_code == 200 and len(resp.text) > 1000:
+                content = resp.text
+                break
+        except Exception:
+            continue
+
+    if not content:
+        return collected
+
+    try:
         # Video patterns check karein
         video_patterns = [
             r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"',
@@ -91,34 +105,20 @@ def extract_fb_media(target_url: str):
         if collected:
             return collected
 
-        # 3. Photos & Image Patterns Extractor
-        photo_patterns = [
-            r'\"photo_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"',
-            r'\"image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"',
-            r'\"full_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"',
-            r'\"viewer_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"'
-        ]
-
-        for pattern in photo_patterns:
-            matches = re.findall(pattern, content)
-            for raw_img in matches:
-                clean_img = clean_fb_cdn_url(raw_img)
-                if is_valid_post_photo(clean_img):
-                    uid = clean_img.split("?")[0].split("/")[-1]
-                    if uid not in seen_ids:
-                        seen_ids.add(uid)
-                        collected.append({"url": clean_img, "type": "jpg"})
-
-        # Fallback general scontent search
-        if not collected:
-            for uri in re.findall(r'\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
-                clean_img = clean_fb_cdn_url(uri)
-                if is_valid_post_photo(clean_img):
-                    match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
-                    uid = match.group(1) if match else clean_img.split("?")[0]
-                    if uid not in seen_ids:
-                        seen_ids.add(uid)
-                        collected.append({"url": clean_img, "type": "jpg"})
+        # 3. Aggressive Photo & Image Patterns Extractor (mbasic aur standard dono ke liye)
+        img_matches = re.findall(r'https?://[^\s<>"]+?scontent[^\s<>"]+?fbcdn\.net[^\s<>"]+?', content)
+        
+        for raw_img in img_matches:
+            clean_img = clean_fb_cdn_url(raw_img)
+            # '&amp;' ya extra html entities saaf karein
+            clean_img = clean_img.split('&amp;')[0].split('"')[0]
+            if is_valid_post_photo(clean_img):
+                match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img) or \
+                        re.search(r'([0-9]{8,25}_[0-9]{8,25}_[no]\.(?:jpg|png|webp))', clean_img)
+                uid = match.group(1) if match else clean_img.split("?")[0].split("/")[-1]
+                if uid not in seen_ids:
+                    seen_ids.add(uid)
+                    collected.append({"url": clean_img, "type": "jpg"})
 
     except Exception as e:
         print("Scraper warning:", e)
