@@ -5,4 +5,3 @@ requests
 pydantic
 mangum
 instaloader
-playwright
