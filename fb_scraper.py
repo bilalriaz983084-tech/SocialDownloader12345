@@ -32,16 +32,13 @@ def extract_fb_media(target_url: str):
     seen_urls = set()
     seen_ids = set()
 
+    # Browserless Remote Endpoint with API Key
+    api_key = "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af"
+    ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}"
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
-            ]
-        )
+        browser = p.chromium.connect_over_cdp(ws_endpoint)
+        
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 768}
