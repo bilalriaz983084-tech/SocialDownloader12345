@@ -107,20 +107,24 @@ def extract_fb_media(target_url: str):
             if collected:
                 return collected
 
-            # 2. Unlimited Photos/Album Extractor (Updated for full 11+ images)
+            # 2. Unlimited Photos/Album Extractor (Using JS click to bypass pointer interception)
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
-                photo_link.click(timeout=4000)
+                try:
+                    page.evaluate("el => el.click()", photo_link.element_handle())
+                except Exception:
+                    photo_link.click(force=True, timeout=5000)
+                
                 page.wait_for_timeout(3000)
 
                 consecutive_no_new = 0
-                for _ in range(30):  # Range barha di hai taake saari slides cross ho jayein
+                for _ in range(30):
                     try:
                         page.keyboard.press("ArrowRight")
                     except Exception:
                         pass
                     
-                    page.wait_for_timeout(1000)  # Images load hone ka proper wait time
+                    page.wait_for_timeout(1000)
 
                     active_imgs = page.eval_on_selector_all(
                         'div[role="dialog"] img, div[data-visualcompletion="media-vc-image"] img, img[data-visualcompletion="media-vc-image"]',
@@ -141,7 +145,7 @@ def extract_fb_media(target_url: str):
 
                     if not new_found:
                         consecutive_no_new += 1
-                        if consecutive_no_new >= 5:  # Jab tak saari photos na aa jayein tab tak loop chalega
+                        if consecutive_no_new >= 5:
                             break
                     else:
                         consecutive_no_new = 0
