@@ -90,15 +90,34 @@ def extract_fb_media(target_url: str):
         if collected:
             return collected
 
-        # Static Photos fallback from HTML source
-        for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
-            clean_img = clean_fb_cdn_url(uri)
-            if is_valid_post_photo(clean_img):
-                match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
-                uid = match.group(1) if match else clean_img.split("?")[0]
-                if uid not in seen_ids:
-                    seen_ids.add(uid)
-                    collected.append({"url": clean_img, "type": "jpg"})
+        # 3. Updated Photos & Image Patterns Extractor
+        photo_patterns = [
+            r'\"photo_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"',
+            r'\"image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"',
+            r'\"full_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"',
+            r'\"viewer_image\":\s*\{\s*\"uri\":\s*\"(https:[^\"]+?)\"'
+        ]
+
+        for pattern in photo_patterns:
+            matches = re.findall(pattern, content)
+            for raw_img in matches:
+                clean_img = clean_fb_cdn_url(raw_img)
+                if is_valid_post_photo(clean_img):
+                    uid = clean_img.split("?")[0].split("/")[-1]
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        collected.append({"url": clean_img, "type": "jpg"})
+
+        # Fallback general scontent search if specific patterns missed
+        if not collected:
+            for uri in re.findall(r'\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
+                clean_img = clean_fb_cdn_url(uri)
+                if is_valid_post_photo(clean_img):
+                    match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
+                    uid = match.group(1) if match else clean_img.split("?")[0]
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        collected.append({"url": clean_img, "type": "jpg"})
 
     except Exception as e:
         print("Scraper warning:", e)
