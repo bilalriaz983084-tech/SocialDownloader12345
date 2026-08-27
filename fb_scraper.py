@@ -1,3 +1,5 @@
+import os
+import json
 import re
 import urllib.parse
 from playwright.sync_api import sync_playwright
@@ -27,6 +29,31 @@ def is_valid_post_photo(url: str) -> bool:
     ]
     return not any(b in lower for b in blocked) and url.startswith("https://")
 
+def load_cookies_to_context(context):
+    cookie_files = ["cookies.json", "facebook_cookies.json"]
+    for file_name in cookie_files:
+        if os.path.exists(file_name):
+            try:
+                with open(file_name, "r", encoding="utf-8") as f:
+                    cookies = json.load(f)
+                    formatted_cookies = []
+                    for c in cookies:
+                        cookie_dict = {
+                            "name": c.get("name"),
+                            "value": c.get("value"),
+                            "domain": c.get("domain", ".facebook.com"),
+                            "path": c.get("path", "/")
+                        }
+                        if "expirationDate" in c:
+                            cookie_dict["expires"] = c["expirationDate"]
+                        formatted_cookies.append(cookie_dict)
+                    context.add_cookies(formatted_cookies)
+                    print(f"Successfully loaded cookies from {file_name}")
+                    return True
+            except Exception as e:
+                print(f"Error loading {file_name}: {e}")
+    return False
+
 def extract_fb_media(target_url: str):
     collected = []
     seen_urls = set()
@@ -43,6 +70,10 @@ def extract_fb_media(target_url: str):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 768}
         )
+        
+        # Load cookies automatically
+        load_cookies_to_context(context)
+
         page = context.new_page()
 
         try:
