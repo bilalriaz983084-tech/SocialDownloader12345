@@ -83,7 +83,7 @@ def extract_fb_media(target_url: str):
                 page.wait_for_timeout(2000)
 
                 consecutive_no_new = 0
-                for _ in range(50):
+                for _ in range(40):
                     active_imgs = page.eval_on_selector_all(
                         'div[role="dialog"] img, div[data-visualcompletion="media-vc-image"] img, img[data-visualcompletion="media-vc-image"]',
                         "elements => elements.map(e => e.src)"
@@ -103,13 +103,13 @@ def extract_fb_media(target_url: str):
 
                     if not new_found:
                         consecutive_no_new += 1
-                        if consecutive_no_new >= 3:
+                        if consecutive_no_new >= 6:
                             break
                     else:
                         consecutive_no_new = 0
 
                     page.keyboard.press("ArrowRight")
-                    page.wait_for_timeout(600)
+                    page.wait_for_timeout(800)
 
             # 3. Static single-photo fallback
             if not collected:
