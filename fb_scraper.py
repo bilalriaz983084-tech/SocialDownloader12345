@@ -1,7 +1,9 @@
 import os
 import json
 import re
+import html as html_lib
 import urllib.parse
+import time
 from playwright.sync_api import sync_playwright
 
 def clean_fb_cdn_url(raw_url: str) -> str:
@@ -13,12 +15,12 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     except Exception:
         pass
     clean = clean.replace(r'\/', '/')
-    clean = urllib.parse.unquote(clean)
+    clean = html_lib.unescape(clean)
     clean = clean.replace(r'\u0026', '&').replace('&amp;', '&')
     return clean.strip("\"'<> ,\\")
 
 def is_valid_post_photo(url: str) -> bool:
-    if not url or "scontent" not in url or "fbcdn.net" not in url:
+    if not url or "fbcdn.net" not in url:
         return False
     lower = url.lower()
     blocked = [
@@ -26,41 +28,88 @@ def is_valid_post_photo(url: str) -> bool:
         "s50x50", "s100x100", "s150x150", "p180x180", "s200x200",
         "rsrc.php", "emoji.php", "safe_image.php", "static", "profile",
         "_a.jpg", "_a.png", "ads", "sponsor", "banner", "external",
-        "t39.1997-6", "t39.1998-6", "100x100"
+        "t39.1997-6", "t39.1998-6", "100x100", "giphy", "emg1"
     ]
-    return not any(b in lower for b in blocked) and url.startswith("https://")
+    return not any(b in lower for b in blocked) and url.startswith("https://") and ("oh=" in url and "oe=" in url)
 
 def extract_fb_media(target_url: str):
     collected = []
     seen_ids = set()
 
-    api_key = os.environ.get("BROWSERLESS_API_KEY", "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af")
-    ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}"
+    api_key = os.environ.get("BROWSERLESS_API_KEY", "")
+    use_remote = bool(api_key)
+    ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}" if use_remote else None
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(ws_endpoint)
+            # Connect remotely agar API key ho, warna local chromium launch karein
+            if use_remote:
+                try:
+                    browser = p.chromium.connect_over_cdp(ws_endpoint)
+                except Exception:
+                    browser = p.chromium.launch(headless=True)
+            else:
+                browser = p.chromium.launch(headless=True)
+
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
                 viewport={"width": 1366, "height": 768}
             )
             page = context.new_page()
 
+            # Dynamic network response interceptor for CDN photos
+            def handle_response(response):
+                try:
+                    res_url = response.url
+                    if "fbcdn.net/v/t39." in res_url:
+                        clean_img = clean_fb_cdn_url(res_url)
+                        if is_valid_post_photo(clean_img):
+                            match = re.search(r'/([0-9]{8,25})_', clean_img)
+                            uid = match.group(1) if match else clean_img.split("?")[0].split("/")[-1]
+                            if uid not in seen_ids:
+                                seen_ids.add(uid)
+                                collected.append({"url": clean_img, "type": "jpg"})
+                except Exception:
+                    pass
+
+            page.on("response", handle_response)
+
             try:
                 desktop_url = target_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
                 page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3500)
+                page.wait_for_timeout(2500)
 
-                # Auto-scroll for full album / multi-image posts
-                for _ in range(2):
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1000)
+                # Close login modal/dialog if present
+                try:
+                    close_btn = page.query_selector('div[aria-label="Close"], [aria-label="Decline optional cookies"]')
+                    if close_btn:
+                        close_btn.click()
+                except Exception:
+                    pass
+
+                # Auto-scroll page
+                page.mouse.wheel(0, 1200)
+                page.wait_for_timeout(1500)
+
+                # -------------------------------------------------------------
+                # THEATER MODE NAVIGATION (Crucial for 5+ Multi-Photo Albums)
+                # -------------------------------------------------------------
+                clickable_photos = page.query_selector_all('a[href*="/photo"], a[href*="photo.php"]')
+                if clickable_photos:
+                    try:
+                        clickable_photos[0].click()
+                        page.wait_for_timeout(1500)
+
+                        # Loop ArrowRight key to force GraphQL to stream all images
+                        for _ in range(15):
+                            page.keyboard.press("ArrowRight")
+                            page.wait_for_timeout(600)
+                    except Exception:
+                        pass
 
                 content = page.content()
 
-                # -------------------------------------------------------------
-                # STEP 1: Strict High-Res Images Extraction
-                # -------------------------------------------------------------
+                # Step 1: Script JSON fallback
                 script_matches = re.findall(r'\"(?:image|photo_image|full_image|viewer_image)\":\s*\{\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
                 script_matches += re.findall(r'\"(?:uri|src|preview_image)\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
 
@@ -73,7 +122,7 @@ def extract_fb_media(target_url: str):
                             seen_ids.add(uid)
                             collected.append({"url": clean_img, "type": "jpg"})
 
-                # DOM fallback for images
+                # Step 2: DOM fallback
                 imgs = page.eval_on_selector_all(
                     'div[role="main"] img, div[data-visualcompletion="media-vc-image"] img',
                     "elements => elements.map(e => e.src)"
@@ -87,13 +136,10 @@ def extract_fb_media(target_url: str):
                             seen_ids.add(uid)
                             collected.append({"url": clean_img, "type": "jpg"})
 
-                # Agar photos mil gayi hain to 100% photo return karega (Galat video nahi aayegi)
                 if collected:
                     return collected
 
-                # -------------------------------------------------------------
-                # STEP 2: Only Video (Jab koi photo na ho aur video post ho)
-                # -------------------------------------------------------------
+                # Step 3: Video Fallback
                 video_patterns = [
                     (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
                     (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
