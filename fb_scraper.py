@@ -26,7 +26,7 @@ def is_valid_post_photo(url: str) -> bool:
         "s50x50", "s100x100", "s150x150", "p180x180", "s200x200",
         "rsrc.php", "emoji.php", "safe_image.php", "static", "profile",
         "_a.jpg", "_a.png", "ads", "sponsor", "banner", "external",
-        "t39.1997-6", "t39.1998-6"
+        "t39.1997-6", "t39.1998-6", "100x100"
     ]
     return not any(b in lower for b in blocked) and url.startswith("https://")
 
@@ -49,47 +49,68 @@ def extract_fb_media(target_url: str):
             try:
                 desktop_url = target_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
                 page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(4000)
+                page.wait_for_timeout(3500)
 
-                # Page scroll taake saari images load ho jayein
-                for _ in range(3):
+                # Auto-scroll for full album / multi-image posts
+                for _ in range(2):
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1500)
+                    page.wait_for_timeout(1000)
 
                 content = page.content()
 
-                # 1. Sabse pehle Photos / Album scan karein taake images miss na hon
-                all_raw_links = re.findall(r'\"(?:image|photo_image|full_image|uri|src|preview_image):\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
-                all_raw_links += re.findall(r'(https:\/\/[^\s<>"]+?scontent[^\s<>"]+?fbcdn\.net[^\s<>"]+?\.(?:jpg|png|webp)[^\s<>"]*)', content)
+                # -------------------------------------------------------------
+                # STEP 1: Strict High-Res Images Extraction
+                # -------------------------------------------------------------
+                script_matches = re.findall(r'\"(?:image|photo_image|full_image|viewer_image)\":\s*\{\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
+                script_matches += re.findall(r'\"(?:uri|src|preview_image)\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
 
-                for raw_uri in all_raw_links:
+                for raw_uri in script_matches:
                     clean_img = clean_fb_cdn_url(raw_uri)
                     if is_valid_post_photo(clean_img):
-                        match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img) or \
-                                re.search(r'([0-9]{8,25}_[0-9]{8,25}_[no]\.(?:jpg|png|webp))', clean_img)
+                        match = re.search(r'/([0-9]{8,25})_', clean_img)
                         uid = match.group(1) if match else clean_img.split("?")[0].split("/")[-1]
                         if uid not in seen_ids:
                             seen_ids.add(uid)
                             collected.append({"url": clean_img, "type": "jpg"})
 
-                # Agar images mil gayi hain toh foran return kar dein, video check karne ki zaroorat nahi
+                # DOM fallback for images
+                imgs = page.eval_on_selector_all(
+                    'div[role="main"] img, div[data-visualcompletion="media-vc-image"] img',
+                    "elements => elements.map(e => e.src)"
+                )
+                for src in imgs:
+                    clean_img = clean_fb_cdn_url(src)
+                    if is_valid_post_photo(clean_img):
+                        match = re.search(r'/([0-9]{8,25})_', clean_img)
+                        uid = match.group(1) if match else clean_img.split("?")[0].split("/")[-1]
+                        if uid not in seen_ids:
+                            seen_ids.add(uid)
+                            collected.append({"url": clean_img, "type": "jpg"})
+
+                # Agar photos mil gayi hain to 100% photo return karega (Galat video nahi aayegi)
                 if collected:
                     return collected
 
-                # 2. Agar post waqai video ki hai (aur koi photo nahi mili), tab video patterns check karein
+                # -------------------------------------------------------------
+                # STEP 2: Only Video (Jab koi photo na ho aur video post ho)
+                # -------------------------------------------------------------
                 video_patterns = [
-                    r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"',
-                    r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"',
-                    r'\"playable_url\":\s*\"(https:[^\"]+?)\"',
-                    r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"'
+                    (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
+                    (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
+                    (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
+                    (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
                 ]
-                for pattern in video_patterns:
+
+                for pattern, quality in video_patterns:
                     matches = re.findall(pattern, content)
                     for raw_vid in matches:
                         clean_vid = clean_fb_cdn_url(raw_vid)
-                        if clean_vid:
-                            collected.append({"url": clean_vid, "type": "mp4"})
-                            return collected
+                        if clean_vid and "fbcdn.net" in clean_vid:
+                            return [{
+                                "url": clean_vid,
+                                "type": "mp4",
+                                "quality": f"Facebook Video ({quality})"
+                            }]
 
             except Exception as e:
                 print("Scraper inner error:", repr(e))
