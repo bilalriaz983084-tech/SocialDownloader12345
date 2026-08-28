@@ -749,7 +749,7 @@ def extract_youtube_api(video_id: str, is_audio: bool = False):
 
 
 # =========================================================
-# YOUTUBE MAIN EXTRACTOR
+# YOUTUBE MAIN EXTRACTOR (Updated & Stable for Vercel)
 # =========================================================
 
 def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
@@ -764,17 +764,21 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
     match = re.search(r"(?:v=|\/|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})", clean_url)
     video_id = match.group(1) if match else None
 
-    # Guaranteed clean JPG preview image
     clean_thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else ""
 
     if video_id:
         clean_url = f"https://www.youtube.com/watch?v={video_id}"
 
+        # Pehle Piped/Invidious APIs se try karein (Vercel ke liye best hai)
         api_results = extract_youtube_api(video_id, is_audio)
         if api_results:
             return api_results
 
+    # Fallback to yt-dlp with client options
     options = get_ytdlp_runtime_options()
+    options.update({
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
+    })
 
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -790,7 +794,6 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
         
         formats_list = info.get("formats", [])
 
-        # Audio request
         if is_audio:
             for f in reversed(formats_list):
                 f_url = f.get("url")
@@ -803,48 +806,28 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
                         "thumbnail": raw_thumb
                     }]
 
-        # 1080p, 720p, 480p, 360p Merged Links (Audio + Video)
         target_heights = [1080, 720, 480, 360]
-        available_heights = set()
+        seen_h = set()
 
         for f in formats_list:
+            f_url = f.get("url")
             h = f.get("height")
-            if h in target_heights:
-                available_heights.add(h)
+            if f_url and h in target_heights and h not in seen_h:
+                seen_h.add(h}
+                results.append({
+                    "url": f_url,
+                    "type": "mp4",
+                    "quality": f"{h}p Full HD" if h == 1080 else f"{h}p HD" if h >= 720 else f"{h}p",
+                    "thumbnail": raw_thumb
+                })
 
-        base_endpoint = host_url.rstrip("/") if host_url else "http://127.0.0.1:8000"
-        encoded_url = urllib.parse.quote(clean_url)
-
-        for h in sorted(list(available_heights), reverse=True):
-            merged_download_url = f"{base_endpoint}/download?url={encoded_url}&quality={h}"
-            results.append({
-                "url": merged_download_url,
-                "type": "mp4",
-                "quality": f"{h}p Full HD" if h == 1080 else f"{h}p HD" if h >= 720 else f"{h}p",
-                "thumbnail": raw_thumb
-            })
-
-        if not results:
-            for h in target_heights:
-                for f in reversed(formats_list):
-                    f_url = f.get("url")
-                    if f_url and f.get("height") == h:
-                        results.append({
-                            "url": f_url,
-                            "type": "mp4",
-                            "quality": f"{h}p HD" if h >= 720 else f"{h}p",
-                            "thumbnail": raw_thumb
-                        })
-                        break
-
-        return results
+        if results:
+            return sorted(results, key=lambda x: int(re.sub(r"\D", "", x["quality"].split()[0])), reverse=True)
 
     except Exception as e:
-        print("[ERROR] YouTube extraction error:", repr(e))
-        return []
+        print("[ERROR] YouTube yt-dlp extraction error:", repr(e))
 
-
-# =========================================================
+    return []# =========================================================
 # ROOT
 # =========================================================
 
