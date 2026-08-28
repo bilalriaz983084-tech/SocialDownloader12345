@@ -615,7 +615,6 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
             data = res["data"]
             cover_img = data.get("cover") or data.get("origin_cover") or data.get("dynamic_cover")
 
-            # Photos
             if "images" in data and isinstance(data["images"], list) and len(data["images"]) > 0:
                 media_items = []
                 for idx, img_url in enumerate(data["images"]):
@@ -628,7 +627,6 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
                 if media_items:
                     return media_items
 
-            # Audio
             if is_audio:
                 music_url = data.get("music") or data.get("music_info", {}).get("play")
                 if music_url:
@@ -638,7 +636,6 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
                         "thumbnail": cover_img
                     }]
 
-            # Video
             video_url = data.get("hdplay") or data.get("play") or data.get("wmplay")
             if video_url:
                 return [{
@@ -769,12 +766,10 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
     if video_id:
         clean_url = f"https://www.youtube.com/watch?v={video_id}"
 
-        # Pehle Piped/Invidious APIs se try karein (Vercel ke liye best hai)
         api_results = extract_youtube_api(video_id, is_audio)
         if api_results:
             return api_results
 
-    # Fallback to yt-dlp with client options
     options = get_ytdlp_runtime_options()
     options.update({
         "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
@@ -813,7 +808,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
             f_url = f.get("url")
             h = f.get("height")
             if f_url and h in target_heights and h not in seen_h:
-                seen_h.add(h}
+                seen_h.add(h)
                 results.append({
                     "url": f_url,
                     "type": "mp4",
@@ -827,7 +822,10 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
     except Exception as e:
         print("[ERROR] YouTube yt-dlp extraction error:", repr(e))
 
-    return []# =========================================================
+    return []
+
+
+# =========================================================
 # ROOT
 # =========================================================
 
@@ -1111,9 +1109,6 @@ async def extract_media(
 
         )
 
-    # -----------------------------------------------------
-    # THUMBNAIL (Valid High-Quality Image Preview)
-    # -----------------------------------------------------
     first_thumb = ""
 
     for item in media_items:
@@ -1122,7 +1117,6 @@ async def extract_media(
             first_thumb = t
             break
 
-    # Convert .webp to standard .jpg for mobile app preview
     if first_thumb and ".webp" in first_thumb:
         first_thumb = first_thumb.replace(".webp", ".jpg").replace("vi_webp", "vi")
 
@@ -1132,7 +1126,6 @@ async def extract_media(
                 first_thumb = fmt["downloadUrl"]
                 break
 
-    # Fallbacks if remote link gives no preview
     if not first_thumb:
         if platform == "Facebook":
             first_thumb = "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&q=80"
