@@ -31,11 +31,17 @@ def is_valid_post_photo(url: str) -> bool:
     return not any(b in lower for b in blocked) and url.startswith("https://")
 
 def load_cookies_to_context(context):
-    cookie_files = ["cookies.json", "facebook_cookies.json"]
-    for file_name in cookie_files:
-        if os.path.exists(file_name):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cookie_files = [
+        os.path.join(base_dir, "facebook_cookies.json"),
+        os.path.join(base_dir, "cookies.json"),
+        "facebook_cookies.json",
+        "cookies.json"
+    ]
+    for file_path in cookie_files:
+        if os.path.exists(file_path):
             try:
-                with open(file_name, "r", encoding="utf-8") as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     cookies = json.load(f)
                     formatted_cookies = []
                     for c in cookies:
@@ -49,10 +55,11 @@ def load_cookies_to_context(context):
                             cookie_dict["expires"] = c["expirationDate"]
                         formatted_cookies.append(cookie_dict)
                     context.add_cookies(formatted_cookies)
-                    print(f"Successfully loaded cookies from {file_name}")
+                    print(f"Successfully loaded cookies from {file_path}")
                     return True
             except Exception as e:
-                print(f"Error loading {file_name}: {e}")
+                print(f"Error loading {file_path}: {e}")
+    print("WARNING: No cookie file loaded!")
     return False
 
 def extract_fb_media(target_url: str):
@@ -60,7 +67,6 @@ def extract_fb_media(target_url: str):
     seen_urls = set()
     seen_ids = set()
 
-    # Browserless Remote Endpoint or Local Fallback
     api_key = "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af"
     ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}"
 
@@ -83,19 +89,17 @@ def extract_fb_media(target_url: str):
             viewport={"width": 1366, "height": 768}
         )
         
-        # Load cookies automatically so Facebook allows viewing full albums/galleries
         load_cookies_to_context(context)
-
         page = context.new_page()
 
         try:
             desktop_url = target_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
             page.goto(desktop_url, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(3500)
 
             content = page.content()
 
-            # 1. Video Check
+            # Video check
             video_patterns = [
                 (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
                 (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
@@ -109,16 +113,12 @@ def extract_fb_media(target_url: str):
                     clean_vid = clean_fb_cdn_url(raw_vid)
                     if clean_vid and clean_vid not in seen_urls:
                         seen_urls.add(clean_vid)
-                        collected.append({
-                            "url": clean_vid,
-                            "type": "mp4",
-                            "quality": quality
-                        })
+                        collected.append({"url": clean_vid, "type": "mp4", "quality": quality})
 
             if collected:
                 return collected
 
-            # 2. Album / Gallery Lightbox Extractor
+            # Gallery / Album click & slide loop
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
                 try:
@@ -129,7 +129,7 @@ def extract_fb_media(target_url: str):
                 page.wait_for_timeout(3000)
 
                 consecutive_no_new = 0
-                for _ in range(30):
+                for _ in range(35):
                     active_imgs = page.eval_on_selector_all(
                         'div[role="dialog"] img[data-visualcompletion="media-vc-image"], div[role="dialog"] img',
                         "elements => elements.map(e => e.src)"
@@ -160,7 +160,7 @@ def extract_fb_media(target_url: str):
                     else:
                         consecutive_no_new = 0
 
-            # 3. Static fallback for single or multi posts
+            # Fallback regex matching
             if not collected:
                 for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
                     clean_img = clean_fb_cdn_url(uri)
