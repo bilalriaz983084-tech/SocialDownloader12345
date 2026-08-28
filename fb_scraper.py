@@ -59,7 +59,6 @@ def extract_fb_media(target_url: str):
     seen_urls = set()
     seen_ids = set()
 
-    # Browserless Remote Endpoint with API Key
     api_key = "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af"
     ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}"
 
@@ -71,7 +70,6 @@ def extract_fb_media(target_url: str):
             viewport={"width": 1366, "height": 768}
         )
         
-        # Load cookies automatically
         load_cookies_to_context(context)
 
         page = context.new_page()
@@ -83,7 +81,6 @@ def extract_fb_media(target_url: str):
 
             content = page.content()
 
-            # 1. Pehle Video URLs check karein (HD / SD)
             video_patterns = [
                 (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
                 (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
@@ -103,11 +100,9 @@ def extract_fb_media(target_url: str):
                             "quality": quality
                         })
 
-            # Agar direct video mil jaye to photos extract nahi karni
             if collected:
                 return collected
 
-            # 2. Unlimited Photos/Album Extractor (Using JS click to bypass pointer interception)
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
                 try:
@@ -150,7 +145,6 @@ def extract_fb_media(target_url: str):
                     else:
                         consecutive_no_new = 0
 
-            # 3. Static single-photo fallback
             if not collected:
                 for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
                     clean_img = clean_fb_cdn_url(uri)
@@ -168,5 +162,4 @@ def extract_fb_media(target_url: str):
 
     return collected
 
-# Purane aur naye dono import names ke liye compatibility alias
 extract_all_fb_photos_sync = extract_fb_media
