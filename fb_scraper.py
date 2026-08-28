@@ -30,37 +30,6 @@ def is_valid_post_photo(url: str) -> bool:
     ]
     return not any(b in lower for b in blocked) and url.startswith("https://")
 
-def load_cookies_to_context(context):
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    cookie_files = [
-        os.path.join(base_dir, "facebook_cookies.json"),
-        os.path.join(base_dir, "cookies.json"),
-        "facebook_cookies.json",
-        "cookies.json"
-    ]
-    for file_path in cookie_files:
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    cookies = json.load(f)
-                    formatted_cookies = []
-                    for c in cookies:
-                        cookie_dict = {
-                            "name": c.get("name"),
-                            "value": c.get("value"),
-                            "domain": c.get("domain", ".facebook.com"),
-                            "path": c.get("path", "/")
-                        }
-                        if "expirationDate" in c:
-                            cookie_dict["expires"] = c["expirationDate"]
-                        formatted_cookies.append(cookie_dict)
-                    context.add_cookies(formatted_cookies)
-                    print(f"Successfully loaded cookies from {file_path}")
-                    return True
-            except Exception as e:
-                print(f"Error loading {file_path}: {e}")
-    return False
-
 def extract_fb_media(target_url: str):
     collected = []
     seen_urls = set()
@@ -78,7 +47,6 @@ def extract_fb_media(target_url: str):
                 viewport={"width": 1366, "height": 768}
             )
             
-            load_cookies_to_context(context)
             page = context.new_page()
 
             try:
@@ -167,7 +135,6 @@ def extract_fb_media(target_url: str):
     except Exception as e:
         print("Facebook scraper connection error:", repr(e))
 
-    # Ultimate Safety Fallback: Agar kisi waja se saari attempts fail ho jayein, toh 404 ki bajaye original link return kar dein taake app crash na ho
     if not collected:
         collected.append({
             "url": target_url,
