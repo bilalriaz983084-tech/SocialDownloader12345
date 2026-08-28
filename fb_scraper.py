@@ -1,12 +1,11 @@
 import os
-import json
 import re
 import html as html_lib
 import urllib.parse
-import time
 from playwright.sync_api import sync_playwright
 
 def clean_fb_cdn_url(raw_url: str) -> str:
+    """Clean and unescape Facebook CDN links so query signatures remain valid."""
     if not raw_url:
         return ""
     clean = str(raw_url).strip()
@@ -20,6 +19,7 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def is_valid_post_photo(url: str) -> bool:
+    """Filter out UI icons, profile badges, emojis, and low-res thumbnails."""
     if not url or "fbcdn.net" not in url:
         return False
     lower = url.lower()
@@ -36,28 +36,21 @@ def extract_fb_media(target_url: str):
     collected = []
     seen_ids = set()
 
-    api_key = os.environ.get("BROWSERLESS_API_KEY", "")
-    use_remote = bool(api_key)
-    ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}" if use_remote else None
+    # Browserless.io remote endpoint configuration
+    api_key = os.environ.get("BROWSERLESS_API_KEY", "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af")
+    ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}"
 
     try:
         with sync_playwright() as p:
-            # Connect remotely agar API key ho, warna local chromium launch karein
-            if use_remote:
-                try:
-                    browser = p.chromium.connect_over_cdp(ws_endpoint)
-                except Exception:
-                    browser = p.chromium.launch(headless=True)
-            else:
-                browser = p.chromium.launch(headless=True)
-
+            # Connect to Browserless remote Chromium instance
+            browser = p.chromium.connect_over_cdp(ws_endpoint)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
                 viewport={"width": 1366, "height": 768}
             )
             page = context.new_page()
 
-            # Dynamic network response interceptor for CDN photos
+            # Dynamic listener to capture background CDN requests during user navigation
             def handle_response(response):
                 try:
                     res_url = response.url
@@ -76,10 +69,10 @@ def extract_fb_media(target_url: str):
 
             try:
                 desktop_url = target_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
-                page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(2500)
+                page.goto(desktop_url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2000)
 
-                # Close login modal/dialog if present
+                # Dismiss login popups or cookie consents if displayed
                 try:
                     close_btn = page.query_selector('div[aria-label="Close"], [aria-label="Decline optional cookies"]')
                     if close_btn:
@@ -87,29 +80,27 @@ def extract_fb_media(target_url: str):
                 except Exception:
                     pass
 
-                # Auto-scroll page
-                page.mouse.wheel(0, 1200)
-                page.wait_for_timeout(1500)
+                # Scroll down to ensure main grid is loaded
+                page.mouse.wheel(0, 1000)
+                page.wait_for_timeout(1000)
 
-                # -------------------------------------------------------------
-                # THEATER MODE NAVIGATION (Crucial for 5+ Multi-Photo Albums)
-                # -------------------------------------------------------------
+                # Trigger Facebook Photo Theater Mode to fetch 5+ images via GraphQL
                 clickable_photos = page.query_selector_all('a[href*="/photo"], a[href*="photo.php"]')
                 if clickable_photos:
                     try:
                         clickable_photos[0].click()
-                        page.wait_for_timeout(1500)
+                        page.wait_for_timeout(1200)
 
-                        # Loop ArrowRight key to force GraphQL to stream all images
-                        for _ in range(15):
+                        # Navigate right using keyboard arrow to stream all hidden album images
+                        for _ in range(10):
                             page.keyboard.press("ArrowRight")
-                            page.wait_for_timeout(600)
+                            page.wait_for_timeout(350)
                     except Exception:
                         pass
 
+                # DOM & Script Parsing Fallback
                 content = page.content()
 
-                # Step 1: Script JSON fallback
                 script_matches = re.findall(r'\"(?:image|photo_image|full_image|viewer_image)\":\s*\{\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
                 script_matches += re.findall(r'\"(?:uri|src|preview_image)\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
 
@@ -122,7 +113,7 @@ def extract_fb_media(target_url: str):
                             seen_ids.add(uid)
                             collected.append({"url": clean_img, "type": "jpg"})
 
-                # Step 2: DOM fallback
+                # DOM img tag inspection
                 imgs = page.eval_on_selector_all(
                     'div[role="main"] img, div[data-visualcompletion="media-vc-image"] img',
                     "elements => elements.map(e => e.src)"
@@ -139,14 +130,13 @@ def extract_fb_media(target_url: str):
                 if collected:
                     return collected
 
-                # Step 3: Video Fallback
+                # Video Extraction Fallback (in case the post is a video)
                 video_patterns = [
                     (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
                     (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
                     (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
                     (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
                 ]
-
                 for pattern, quality in video_patterns:
                     matches = re.findall(pattern, content)
                     for raw_vid in matches:
@@ -162,8 +152,9 @@ def extract_fb_media(target_url: str):
                 print("Scraper inner error:", repr(e))
             finally:
                 browser.close()
+
     except Exception as e:
-        print("Scraper connection error:", repr(e))
+        print("Browserless connection error:", repr(e))
 
     return collected
 
