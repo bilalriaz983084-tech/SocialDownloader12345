@@ -230,7 +230,7 @@ def get_ytdlp_runtime_options():
 
         "geo_bypass": True,
 
-        "nocheckcertificate": True,
+        "nocheckcertificate": False,
 
         "cachedir": False,
 
@@ -239,12 +239,6 @@ def get_ytdlp_runtime_options():
         "restrictfilenames": False,
 
         "skip_download": True,
-
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"]
-            }
-        },
     }
 
     if DENO_PATH:
@@ -621,6 +615,7 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
             data = res["data"]
             cover_img = data.get("cover") or data.get("origin_cover") or data.get("dynamic_cover")
 
+            # Photos
             if "images" in data and isinstance(data["images"], list) and len(data["images"]) > 0:
                 media_items = []
                 for idx, img_url in enumerate(data["images"]):
@@ -633,6 +628,7 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
                 if media_items:
                     return media_items
 
+            # Audio
             if is_audio:
                 music_url = data.get("music") or data.get("music_info", {}).get("play")
                 if music_url:
@@ -642,6 +638,7 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
                         "thumbnail": cover_img
                     }]
 
+            # Video
             video_url = data.get("hdplay") or data.get("play") or data.get("wmplay")
             if video_url:
                 return [{
@@ -661,18 +658,16 @@ def extract_tiktok_media(url: str, is_audio: bool = False):
 
 def extract_youtube_api(video_id: str, is_audio: bool = False):
     instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://vid.puffyan.us",
-        "https://invidious.privacyredirect.com",
-        "https://inv.nadeko.net",
-        "https://api.invidious.io",
         "https://api.piped.privacydev.net",
-        "https://pipedapi.leptons.xyz"
+        "https://pipedapi.leptons.xyz",
+        "https://inv.tux.pizza",
+        "https://invidious.nerdvpn.de",
+        "https://vid.puffyan.us"
     ]
 
     for base in instances:
         try:
-            if "piped" in base or "kavin" in base or "leptons" in base:
+            if "piped" in base:
                 api_url = f"{base}/streams/{video_id}"
                 res = requests.get(api_url, headers=DESKTOP_HEADERS, timeout=4)
                 if res.status_code == 200:
@@ -769,6 +764,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
     match = re.search(r"(?:v=|\/|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})", clean_url)
     video_id = match.group(1) if match else None
 
+    # Guaranteed clean JPG preview image
     clean_thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else ""
 
     if video_id:
@@ -794,6 +790,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
         
         formats_list = info.get("formats", [])
 
+        # Audio request
         if is_audio:
             for f in reversed(formats_list):
                 f_url = f.get("url")
@@ -806,6 +803,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
                         "thumbnail": raw_thumb
                     }]
 
+        # 1080p, 720p, 480p, 360p Merged Links (Audio + Video)
         target_heights = [1080, 720, 480, 360]
         available_heights = set()
 
@@ -1130,6 +1128,9 @@ async def extract_media(
 
         )
 
+    # -----------------------------------------------------
+    # THUMBNAIL (Valid High-Quality Image Preview)
+    # -----------------------------------------------------
     first_thumb = ""
 
     for item in media_items:
@@ -1138,6 +1139,7 @@ async def extract_media(
             first_thumb = t
             break
 
+    # Convert .webp to standard .jpg for mobile app preview
     if first_thumb and ".webp" in first_thumb:
         first_thumb = first_thumb.replace(".webp", ".jpg").replace("vi_webp", "vi")
 
@@ -1147,6 +1149,7 @@ async def extract_media(
                 first_thumb = fmt["downloadUrl"]
                 break
 
+    # Fallbacks if remote link gives no preview
     if not first_thumb:
         if platform == "Facebook":
             first_thumb = "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&q=80"
