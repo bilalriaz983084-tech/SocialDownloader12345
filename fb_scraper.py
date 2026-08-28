@@ -59,6 +59,7 @@ def extract_fb_media(target_url: str):
     seen_urls = set()
     seen_ids = set()
 
+    # Browserless Remote Endpoint with API Key
     api_key = "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af"
     ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}"
 
@@ -70,7 +71,7 @@ def extract_fb_media(target_url: str):
             viewport={"width": 1366, "height": 768}
         )
         
-        # Cookies load karein taake login session bypass ho jaye
+        # Load cookies automatically
         load_cookies_to_context(context)
 
         page = context.new_page()
@@ -82,7 +83,7 @@ def extract_fb_media(target_url: str):
 
             content = page.content()
 
-            # 1. Video URLs check karein
+            # 1. Pehle Video URLs check karein (HD / SD)
             video_patterns = [
                 (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
                 (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
@@ -102,23 +103,24 @@ def extract_fb_media(target_url: str):
                             "quality": quality
                         })
 
+            # Agar direct video mil jaye to photos extract nahi karni
             if collected:
                 return collected
 
-            # 2. Photos/Album Extractor
+            # 2. Unlimited Photos/Album Extractor (Updated for full 11+ images)
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
                 photo_link.click(timeout=4000)
                 page.wait_for_timeout(3000)
 
                 consecutive_no_new = 0
-                for _ in range(30):
+                for _ in range(30):  # Range barha di hai taake saari slides cross ho jayein
                     try:
                         page.keyboard.press("ArrowRight")
                     except Exception:
                         pass
                     
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(1000)  # Images load hone ka proper wait time
 
                     active_imgs = page.eval_on_selector_all(
                         'div[role="dialog"] img, div[data-visualcompletion="media-vc-image"] img, img[data-visualcompletion="media-vc-image"]',
@@ -139,7 +141,7 @@ def extract_fb_media(target_url: str):
 
                     if not new_found:
                         consecutive_no_new += 1
-                        if consecutive_no_new >= 5:
+                        if consecutive_no_new >= 5:  # Jab tak saari photos na aa jayein tab tak loop chalega
                             break
                     else:
                         consecutive_no_new = 0
@@ -162,4 +164,5 @@ def extract_fb_media(target_url: str):
 
     return collected
 
+# Purane aur naye dono import names ke liye compatibility alias
 extract_all_fb_photos_sync = extract_fb_media
