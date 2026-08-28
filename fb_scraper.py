@@ -59,7 +59,6 @@ def load_cookies_to_context(context):
                     return True
             except Exception as e:
                 print(f"Error loading {file_path}: {e}")
-    print("WARNING: No cookie file loaded!")
     return False
 
 def extract_fb_media(target_url: str):
@@ -94,8 +93,8 @@ def extract_fb_media(target_url: str):
 
         try:
             desktop_url = target_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
-            page.goto(desktop_url, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(3500)
+            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(4000)
 
             content = page.content()
 
@@ -118,7 +117,7 @@ def extract_fb_media(target_url: str):
             if collected:
                 return collected
 
-            # Gallery / Album click & slide loop
+            # Album / Gallery Lightbox Extractor (Stronger loop for 10+ photos)
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
                 try:
@@ -126,10 +125,11 @@ def extract_fb_media(target_url: str):
                 except Exception:
                     photo_link.click(force=True, timeout=5000)
                 
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(4000)
 
                 consecutive_no_new = 0
-                for _ in range(35):
+                # Range 50 rakhi hai taake bari se bari album ki saari images cross ho jayein
+                for _ in range(50):
                     active_imgs = page.eval_on_selector_all(
                         'div[role="dialog"] img[data-visualcompletion="media-vc-image"], div[role="dialog"] img',
                         "elements => elements.map(e => e.src)"
@@ -149,18 +149,18 @@ def extract_fb_media(target_url: str):
 
                     try:
                         page.keyboard.press("ArrowRight")
-                        page.wait_for_timeout(1200)
+                        page.wait_for_timeout(1500) # Increased delay to let Facebook render the next image fully
                     except Exception:
                         break
 
                     if not new_found:
                         consecutive_no_new += 1
-                        if consecutive_no_new >= 4:
+                        if consecutive_no_new >= 6: # Increased threshold so it doesn't quit early
                             break
                     else:
                         consecutive_no_new = 0
 
-            # Fallback regex matching
+            # Fallback regex matching if lightbox didn't catch everything
             if not collected:
                 for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
                     clean_img = clean_fb_cdn_url(uri)
