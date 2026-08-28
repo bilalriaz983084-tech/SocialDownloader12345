@@ -1,8 +1,10 @@
 fastapi
 uvicorn
-yt-dlp
 requests
-pydantic
-mangum
+yt-dlp
+yt-dlp-ejs
 instaloader
+pydantic
+beautifulsoup4
+lxml
 playwright
