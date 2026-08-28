@@ -26,7 +26,7 @@ from fb_scraper import extract_fb_media as fb_scraper_extract
 
 app = FastAPI(
     title="Social Downloader Backend",
-    version="20.1"
+    version="20.2"
 )
 
 
@@ -37,7 +37,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -146,17 +146,6 @@ NODE_PATH = find_node()
 
 
 # =========================================================
-# STARTUP INFO
-# =========================================================
-
-print("======================================")
-print("yt-dlp version:", yt_dlp.version.__version__)
-print("Deno:", DENO_PATH if DENO_PATH else "NOT FOUND")
-print("Node:", NODE_PATH if NODE_PATH else "NOT FOUND")
-print("======================================")
-
-
-# =========================================================
 # YT-DLP BASE OPTIONS
 # =========================================================
 
@@ -176,8 +165,6 @@ def get_ytdlp_runtime_options():
         "geo_bypass": True,
         "nocheckcertificate": False,
         "cachedir": False,
-        "windowsfilenames": True,
-        "restrictfilenames": False,
         "skip_download": True,
     }
 
@@ -202,7 +189,7 @@ def get_ytdlp_runtime_options():
 # EXECUTOR & CLEANUP
 # =========================================================
 
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=6)
 
 def remove_temp_file(filepath: str):
     try:
@@ -228,7 +215,7 @@ def resolve_final_url(url: str):
             url,
             headers=DESKTOP_HEADERS,
             allow_redirects=True,
-            timeout=30
+            timeout=20
         )
         return response.url or url
     except Exception as e:
@@ -379,12 +366,6 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
 # =========================================================
 
 def extract_tiktok_media(url: str, is_audio: bool = False):
-    print("\n======================================")
-    print("TIKTOK EXTRACTION")
-    print("URL:", url)
-    print("Audio:", is_audio)
-    print("======================================")
-
     clean_input_url = url.strip()
 
     try:
@@ -534,12 +515,6 @@ def extract_youtube_api(video_id: str, is_audio: bool = False):
 # =========================================================
 
 def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
-    print("\n======================================")
-    print("YOUTUBE EXTRACTION")
-    print("URL:", url)
-    print("Audio:", is_audio)
-    print("======================================")
-
     clean_url = url.strip()
     match = re.search(r"(?:v=|\/|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})", clean_url)
     video_id = match.group(1) if match else None
@@ -580,40 +555,17 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
                         "thumbnail": raw_thumb
                     }]
 
-        base_endpoint = host_url.rstrip("/") if host_url else "http://127.0.0.1:8000"
-        encoded_url = urllib.parse.quote(clean_url)
-
-        results.append({
-            "url": f"{base_endpoint}/download?url={encoded_url}&quality=1080",
-            "type": "mp4",
-            "quality": "1080p Full HD",
-            "thumbnail": raw_thumb
-        })
-
         for f in formats_list:
             f_url = f.get("url")
             if f_url and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("ext") == "mp4":
                 h = f.get("height")
-                if h and h in [720, 480, 360]:
+                if h and h in [1080, 720, 480, 360]:
                     results.append({
                         "url": f_url,
                         "type": "mp4",
-                        "quality": f"{h}p HD" if h >= 720 else f"{h}p",
+                        "quality": f"{h}p Full HD" if h == 1080 else f"{h}p HD" if h >= 720 else f"{h}p",
                         "thumbnail": raw_thumb
                     })
-
-        if len(results) == 1:
-            for h in [720, 480, 360]:
-                for f in reversed(formats_list):
-                    f_url = f.get("url")
-                    if f_url and f.get("height") == h:
-                        results.append({
-                            "url": f"{base_endpoint}/download?url={encoded_url}&quality={h}",
-                            "type": "mp4",
-                            "quality": f"{h}p HD" if h >= 720 else f"{h}p",
-                            "thumbnail": raw_thumb
-                        })
-                        break
 
         return results
 
@@ -630,65 +582,16 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
 def root():
     return {
         "status": "Social Downloader Backend Online",
-        "version": "20.1",
+        "version": "20.2",
         "yt_dlp": yt_dlp.version.__version__,
         "deno": DENO_PATH if DENO_PATH else "NOT FOUND",
         "node": NODE_PATH if NODE_PATH else "NOT FOUND",
-        "storage": "DYNAMIC AUTO-CLEANUP TEMP STORAGE",
         "downloadMode": "DIRECT & MERGED STREAM"
     }
 
 
 # =========================================================
-# MERGED VIDEO + AUDIO DOWNLOAD (FFMPEG)
-# =========================================================
-
-@app.get("/download")
-async def download_merged_video(
-    url: str,
-    quality: str = "1080",
-    background_tasks: BackgroundTasks = BackgroundTasks()
-):
-    clean_url = urllib.parse.unquote(url.strip())
-    temp_dir = tempfile.gettempdir()
-    output_tmpl = os.path.join(temp_dir, "%(id)s_%(resolution)s.%(ext)s")
-
-    format_str = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-
-    ydl_opts = {
-        "format": format_str,
-        "outtmpl": output_tmpl,
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            filename = ydl.prepare_filename(info)
-            if not filename.endswith(".mp4"):
-                filename = os.path.splitext(filename)[0] + ".mp4"
-
-        if os.path.exists(filename):
-            safe_title = re.sub(r'[\\/*?:"<>|]', "", info.get("title", "Video"))
-            background_tasks.add_task(remove_temp_file, filename)
-            return FileResponse(
-                path=filename,
-                media_type="video/mp4",
-                filename=f"{safe_title}_{quality}p.mp4"
-            )
-        else:
-            raise HTTPException(status_code=500, detail="File processing failed.")
-
-    except Exception as e:
-        print("Download/Merge Error:", repr(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# =========================================================
-# MAIN EXTRACT
+# MAIN EXTRACT ROUTE
 # =========================================================
 
 @app.post("/extract")
@@ -703,12 +606,6 @@ async def extract_media(
             status_code=400,
             detail="URL cannot be empty"
         )
-
-    print("\n======================================")
-    print("EXTRACT REQUEST:")
-    print(url)
-    print("Audio:", request.is_audio)
-    print("======================================")
 
     media_items = []
     platform = "Social Media"
@@ -737,13 +634,11 @@ async def extract_media(
         print("Extraction Exception:", repr(e))
         media_items = []
 
-    # Foolproof Safeguard: Kabhi 404 ya crash nahi hoga, safe fallback return karega
     if not media_items:
-        media_items = [{
-            "url": url,
-            "type": "mp4" if platform != "TikTok" else "jpg",
-            "quality": "HD Direct Media"
-        }]
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unable to extract media from {platform}. Link may be private or restricted."
+        )
 
     formats = []
     media_urls = []
@@ -763,10 +658,10 @@ async def extract_media(
 
         if not quality:
             if len(media_items) > 1:
-                quality = f"Item {idx + 1}"
+                quality = f"Photo {idx + 1}" if extension in ["jpg", "jpeg", "png"] else f"Item {idx + 1}"
             elif extension == "mp4":
                 quality = "HD Video"
-            elif extension == "jpg":
+            elif extension in ["jpg", "jpeg", "png"]:
                 quality = "HD Image"
             elif extension in ["mp3", "m4a"]:
                 quality = "Audio"
@@ -778,6 +673,7 @@ async def extract_media(
         })
         media_urls.append(d_url)
 
+    # Resolve primary thumbnail cleanly
     first_thumb = ""
     for item in media_items:
         t = item.get("thumbnail")
@@ -785,22 +681,19 @@ async def extract_media(
             first_thumb = t
             break
 
-    if first_thumb and ".webp" in first_thumb:
-        first_thumb = first_thumb.replace(".webp", ".jpg").replace("vi_webp", "vi")
-
     if not first_thumb:
         for fmt in formats:
-            if fmt["extension"] in ["jpg", "jpeg", "png"]:
+            if fmt.get("extension") in ["jpg", "jpeg", "png"]:
                 first_thumb = fmt["downloadUrl"]
                 break
 
     if not first_thumb:
-        if platform == "Facebook":
-            first_thumb = "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&q=80"
-        elif platform == "YouTube":
-            first_thumb = "https://images.unsplash.com/photo-1611162618071-b39a2ec055fb?w=800&q=80"
-        else:
-            first_thumb = formats[0]["downloadUrl"]
+        first_thumb = "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&q=80"
+
+    is_carousel_album = (
+        len(formats) > 1
+        and any(f.get("extension") in ["jpg", "jpeg", "png"] for f in formats)
+    )
 
     return {
         "status": "success",
@@ -812,29 +705,15 @@ async def extract_media(
         "formats": formats,
         "serverStorage": False,
         "downloadMode": "direct",
-        "fixedQuality": (
-            "HD"
-            if platform == "TikTok"
-            and formats
-            and all(f.get("extension") == "jpg" for f in formats)
-            else None
-        ),
-        "isCarousel": (
-            platform == "TikTok"
-            and len(formats) > 1
-            and all(f.get("extension") == "jpg" for f in formats)
-        )
+        "fixedQuality": "HD" if is_carousel_album else None,
+        "isCarousel": is_carousel_album
     }
 
 
 # =========================================================
-# START SERVER
+# START SERVER (LOCAL TESTING)
 # =========================================================
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="info"
-    )
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="127.0.0.1", port=port, reload=True)
