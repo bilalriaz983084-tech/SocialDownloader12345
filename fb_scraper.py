@@ -55,10 +55,9 @@ def load_cookies_to_context(context):
                             cookie_dict["expires"] = c["expirationDate"]
                         formatted_cookies.append(cookie_dict)
                     context.add_cookies(formatted_cookies)
-                    print(f"Successfully loaded cookies from {file_path}")
                     return True
-            except Exception as e:
-                print(f"Error loading {file_path}: {e}")
+            except Exception:
+                pass
     return False
 
 def extract_fb_media(target_url: str):
@@ -96,80 +95,49 @@ def extract_fb_media(target_url: str):
             page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(4000)
 
+            # Scroll down to force Facebook to load all album images in DOM
+            for _ in range(4):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1500)
+
             content = page.content()
 
-            # Video check
-            video_patterns = [
-                (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
-                (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
-                (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
-                (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
-            ]
+            # 1. Comprehensive regex to grab ALL scontent high-res image URIs from raw script/JSON data in page
+            all_uris = re.findall(r'\"(?:image|photo_image|full_image|uri)\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content)
+            all_uris += re.findall(r'(https:\/\/[^\s<>"]+?scontent[^\s<>"]+?fbcdn\.net[^\s<>"]+?\.(?:jpg|png|webp)[^\s<>"]*)', content)
 
-            for pattern, quality in video_patterns:
-                matches = re.findall(pattern, content)
-                for raw_vid in matches:
-                    clean_vid = clean_fb_cdn_url(raw_vid)
-                    if clean_vid and clean_vid not in seen_urls:
-                        seen_urls.add(clean_vid)
-                        collected.append({"url": clean_vid, "type": "mp4", "quality": quality})
+            for raw_uri in all_uris:
+                clean_img = clean_fb_cdn_url(raw_uri)
+                if is_valid_post_photo(clean_img):
+                    match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img) or \
+                            re.search(r'([0-9]{8,25}_[0-9]{8,25}_[no]\.(?:jpg|png|webp))', clean_img)
+                    uid = match.group(1) if match else clean_img.split("?")[0].split("/")[-1]
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        collected.append({"url": clean_img, "type": "jpg"})
 
-            if collected:
-                return collected
-
-            # Album / Gallery Lightbox Extractor (Stronger loop for 10+ photos)
+            # 2. Lightbox slide check if direct regex missed anything
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
                 try:
                     page.evaluate("el => el.click()", photo_link.element_handle())
-                except Exception:
-                    photo_link.click(force=True, timeout=5000)
-                
-                page.wait_for_timeout(4000)
-
-                consecutive_no_new = 0
-                # Range 50 rakhi hai taake bari se bari album ki saari images cross ho jayein
-                for _ in range(50):
-                    active_imgs = page.eval_on_selector_all(
-                        'div[role="dialog"] img[data-visualcompletion="media-vc-image"], div[role="dialog"] img',
-                        "elements => elements.map(e => e.src)"
-                    )
-                    
-                    new_found = False
-                    for src in active_imgs:
-                        clean_img = clean_fb_cdn_url(src)
-                        if is_valid_post_photo(clean_img):
-                            match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img) or \
-                                    re.search(r'([0-9]{8,25}_[0-9]{8,25}_[no]\.(?:jpg|png|webp))', clean_img)
-                            uid = match.group(1) if match else clean_img.split("?")[0].split("/")[-1]
-                            if uid not in seen_ids:
-                                seen_ids.add(uid)
-                                collected.append({"url": clean_img, "type": "jpg"})
-                                new_found = True
-
-                    try:
+                    page.wait_for_timeout(3000)
+                    for _ in range(20):
+                        active_imgs = page.eval_on_selector_all(
+                            'div[role="dialog"] img',
+                            "elements => elements.map(e => e.src)"
+                        )
+                        for src in active_imgs:
+                            clean_img = clean_fb_cdn_url(src)
+                            if is_valid_post_photo(clean_img):
+                                uid = clean_img.split("?")[0].split("/")[-1]
+                                if uid not in seen_ids:
+                                    seen_ids.add(uid)
+                                    collected.append({"url": clean_img, "type": "jpg"})
                         page.keyboard.press("ArrowRight")
-                        page.wait_for_timeout(1500) # Increased delay to let Facebook render the next image fully
-                    except Exception:
-                        break
-
-                    if not new_found:
-                        consecutive_no_new += 1
-                        if consecutive_no_new >= 6: # Increased threshold so it doesn't quit early
-                            break
-                    else:
-                        consecutive_no_new = 0
-
-            # Fallback regex matching if lightbox didn't catch everything
-            if not collected:
-                for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
-                    clean_img = clean_fb_cdn_url(uri)
-                    if is_valid_post_photo(clean_img):
-                        match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
-                        uid = match.group(1) if match else clean_img.split("?")[0]
-                        if uid not in seen_ids:
-                            seen_ids.add(uid)
-                            collected.append({"url": clean_img, "type": "jpg"})
+                        page.wait_for_timeout(1000)
+                except Exception:
+                    pass
 
         except Exception as e:
             print("Scraper warning:", e)
