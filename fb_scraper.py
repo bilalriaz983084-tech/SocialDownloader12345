@@ -2,7 +2,6 @@ import os
 import re
 import html as html_lib
 import urllib.parse
-import time
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -42,12 +41,12 @@ def is_valid_post_photo(url: str) -> bool:
     ]
     return not any(b in lower for b in blocked) and url.startswith("https://") and ("oh=" in url and "oe=" in url)
 
-def extract_from_raw_html(html_text: str, seen_ids: set, collected: list):
-    # Match JSON script tags
+def parse_html_for_photos(html_text: str, seen_ids: set, collected: list):
+    # 1. Match full high-res FB image JSON blocks
     script_matches = re.findall(r'\"(?:image|photo_image|full_image|viewer_image)\":\s*\{\"uri\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_text)
     script_matches += re.findall(r'\"(?:uri|src|preview_image)\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_text)
     
-    # Direct CDN regex
+    # 2. Match standard photo CDN URLs (t39.30808-6)
     cdn_matches = re.findall(r'https:\/\/[a-zA-Z0-9.\-_]*?\.fbcdn\.net\/v\/t39\.[0-9\-]+-6\/[^"\'\s<>\\]+', html_text)
 
     all_links = script_matches + cdn_matches
@@ -65,21 +64,52 @@ def extract_fb_media(target_url: str):
     collected = []
     seen_ids = set()
 
-    # Step 0: Resolve canonical URL
+    # -------------------------------------------------------------
+    # FAST PATH 1: Direct HTTP Request Engine (Under 1 Second)
+    # -------------------------------------------------------------
     resolved_url = target_url
     try:
         session = requests.Session()
-        res_check = session.get(target_url, headers=HEADERS, allow_redirects=True, timeout=10)
-        resolved_url = res_check.url or target_url
-        extract_from_raw_html(res_check.text, seen_ids, collected)
-    except Exception as e:
-        print("Direct resolve warning:", e)
+        res = session.get(target_url, headers=HEADERS, allow_redirects=True, timeout=8)
+        resolved_url = res.url or target_url
+        parse_html_for_photos(res.text, seen_ids, collected)
 
-    # Agar direct request se hi 2+ images mil gayi to return kar dein (Fastest)
-    if len(collected) >= 2:
+        # Also check mobile view payload for hidden album items
+        if "www.facebook.com" in resolved_url:
+            m_url = resolved_url.replace("www.facebook.com", "m.facebook.com")
+            m_res = session.get(m_url, headers=HEADERS, allow_redirects=True, timeout=8)
+            parse_html_for_photos(m_res.text, seen_ids, collected)
+    except Exception as e:
+        print("Fast HTTP extraction warning:", repr(e))
+
+    # Agar 1 ya zyada photos mil chuki hain to foran return karein (No delay for Mobile App)
+    if collected:
         return collected
 
-    # Step 1: Headless Automation via Browserless
+    # -------------------------------------------------------------
+    # FAST PATH 2: Video Fallback
+    # -------------------------------------------------------------
+    if 'res' in locals() and res.text:
+        video_patterns = [
+            (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
+            (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
+            (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
+            (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
+        ]
+        for pattern, quality in video_patterns:
+            matches = re.findall(pattern, res.text)
+            for raw_vid in matches:
+                clean_vid = clean_fb_cdn_url(raw_vid)
+                if clean_vid and "fbcdn.net" in clean_vid:
+                    return [{
+                        "url": clean_vid,
+                        "type": "mp4",
+                        "quality": f"Facebook Video ({quality})"
+                    }]
+
+    # -------------------------------------------------------------
+    # PATH 3: Browserless Automation (Only if Direct Fetch fails)
+    # -------------------------------------------------------------
     api_key = os.environ.get("BROWSERLESS_API_KEY", "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af")
     ws_endpoint = f"wss://production-sfo.browserless.io?token={api_key}&stealth=true"
 
@@ -87,7 +117,7 @@ def extract_fb_media(target_url: str):
         with sync_playwright() as p:
             browser = None
             try:
-                browser = p.chromium.connect_over_cdp(ws_endpoint, timeout=15000)
+                browser = p.chromium.connect_over_cdp(ws_endpoint, timeout=10000)
             except Exception:
                 try:
                     browser = p.chromium.launch(headless=True)
@@ -118,70 +148,37 @@ def extract_fb_media(target_url: str):
                 page.on("response", handle_response)
 
                 try:
-                    page.goto(resolved_url, wait_until="domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(2000)
+                    page.goto(resolved_url, wait_until="domcontentloaded", timeout=12000)
+                    page.wait_for_timeout(1500)
 
-                    # Close login / cookie banners
-                    try:
-                        close_btn = page.query_selector('div[aria-label="Close"], [aria-label="Decline optional cookies"]')
-                        if close_btn:
-                            close_btn.click()
-                    except Exception:
-                        pass
-
-                    page.mouse.wheel(0, 1000)
-                    page.wait_for_timeout(1000)
-
-                    # Trigger photo viewer
                     clickable_photos = page.query_selector_all('a[href*="/photo"], a[href*="photo.php"]')
                     if clickable_photos:
                         try:
                             clickable_photos[0].click()
-                            page.wait_for_timeout(1000)
-                            for _ in range(8):
+                            page.wait_for_timeout(800)
+                            for _ in range(6):
                                 page.keyboard.press("ArrowRight")
-                                page.wait_for_timeout(400)
+                                page.wait_for_timeout(300)
                         except Exception:
                             pass
 
-                    # Extract rendered DOM
-                    content = page.content()
-                    extract_from_raw_html(content, seen_ids, collected)
-
-                    # Check for video post if no photos
-                    if not collected:
-                        video_patterns = [
-                            (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
-                            (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
-                            (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
-                            (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
-                        ]
-                        for pattern, quality in video_patterns:
-                            matches = re.findall(pattern, content)
-                            for raw_vid in matches:
-                                clean_vid = clean_fb_cdn_url(raw_vid)
-                                if clean_vid and "fbcdn.net" in clean_vid:
-                                    return [{
-                                        "url": clean_vid,
-                                        "type": "mp4",
-                                        "quality": f"Facebook Video ({quality})"
-                                    }]
-
+                    parse_html_for_photos(page.content(), seen_ids, collected)
                 except Exception as inner_e:
                     print("Browser inner error:", inner_e)
                 finally:
                     browser.close()
-
     except Exception as e:
-        print("Playwright connection exception:", e)
+        print("Playwright connection error:", repr(e))
 
-    # Fallback to OpenGraph meta tag if single photo post
-    if not collected and 'res_check' in locals():
-        og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', res_check.text)
+    # -------------------------------------------------------------
+    # FINAL OPENGRAPH FALLBACK
+    # -------------------------------------------------------------
+    if not collected and 'res' in locals() and res.text:
+        og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', res.text)
         if og_match:
-            og_url = clean_fb_cdn_url(og_match.group(1))
-            if is_valid_post_photo(og_url):
-                collected.append({"url": og_url, "type": "jpg"})
+            og_clean = clean_fb_cdn_url(og_match.group(1))
+            if is_valid_post_photo(og_clean):
+                collected.append({"url": og_clean, "type": "jpg"})
 
     return collected
 
