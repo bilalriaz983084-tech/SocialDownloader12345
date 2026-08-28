@@ -768,6 +768,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
     if video_id:
         clean_url = f"https://www.youtube.com/watch?v={video_id}"
 
+        # Pehle Piped/Invidious APIs try karein
         api_results = extract_youtube_api(video_id, is_audio)
         if api_results:
             return api_results
@@ -819,19 +820,6 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
                 "quality": f"{h}p Full HD" if h == 1080 else f"{h}p HD" if h >= 720 else f"{h}p",
                 "thumbnail": raw_thumb
             })
-
-        if not results:
-            for h in target_heights:
-                for f in reversed(formats_list):
-                    f_url = f.get("url")
-                    if f_url and f.get("height") == h:
-                        results.append({
-                            "url": f_url,
-                            "type": "mp4",
-                            "quality": f"{h}p HD" if h >= 720 else f"{h}p",
-                            "thumbnail": raw_thumb
-                        })
-                        break
 
         return results
 
