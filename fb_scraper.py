@@ -70,6 +70,7 @@ def extract_fb_media(target_url: str):
             viewport={"width": 1366, "height": 768}
         )
         
+        # Cookies load karein taake login session bypass ho jaye
         load_cookies_to_context(context)
 
         page = context.new_page()
@@ -81,6 +82,7 @@ def extract_fb_media(target_url: str):
 
             content = page.content()
 
+            # 1. Video URLs check karein
             video_patterns = [
                 (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
                 (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
@@ -103,13 +105,10 @@ def extract_fb_media(target_url: str):
             if collected:
                 return collected
 
+            # 2. Photos/Album Extractor
             photo_link = page.locator('a[href*="/photo/"], a[href*="photo.php"], a[href*="/photos/"]').first
             if photo_link.count() > 0:
-                try:
-                    page.evaluate("el => el.click()", photo_link.element_handle())
-                except Exception:
-                    photo_link.click(force=True, timeout=5000)
-                
+                photo_link.click(timeout=4000)
                 page.wait_for_timeout(3000)
 
                 consecutive_no_new = 0
@@ -145,6 +144,7 @@ def extract_fb_media(target_url: str):
                     else:
                         consecutive_no_new = 0
 
+            # 3. Static single-photo fallback
             if not collected:
                 for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
                     clean_img = clean_fb_cdn_url(uri)
