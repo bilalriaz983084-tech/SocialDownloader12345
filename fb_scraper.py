@@ -1,4 +1,7 @@
+import os
 import re
+import sys
+import json
 import urllib.parse
 from playwright.sync_api import sync_playwright
 
@@ -6,7 +9,6 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     if not raw_url:
         return ""
     clean = str(raw_url).strip()
-    # Safe JSON string unescape
     clean = clean.replace(r'\/', '/').replace('\\"', '"')
     clean = clean.replace(r'\u0026', '&').replace('&amp;', '&')
     clean = urllib.parse.unquote(clean)
@@ -50,7 +52,7 @@ def extract_fb_media(target_url: str):
             page.goto(desktop_url, wait_until="domcontentloaded", timeout=25000)
             page.wait_for_timeout(2500)
 
-            # Cookie / Login popup dismiss
+            # Close Cookie/Login Banner if appears
             try:
                 close_btn = page.locator('div[role="dialog"] div[aria-label="Close"], div[aria-label="Decline optional cookies"]').first
                 if close_btn.count() > 0:
@@ -121,7 +123,7 @@ def extract_fb_media(target_url: str):
                     page.keyboard.press("ArrowRight")
                     page.wait_for_timeout(500)
 
-            # 3. Static fallback
+            # 3. Static single-photo fallback
             if not collected:
                 for uri in re.findall(r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"', content):
                     clean_img = clean_fb_cdn_url(uri)
@@ -133,7 +135,7 @@ def extract_fb_media(target_url: str):
                             collected.append({"url": clean_img, "type": "jpg"})
 
         except Exception as e:
-            print("Scraper warning:", e)
+            print("Facebook Playwright Warning:", repr(e))
         finally:
             context.close()
             browser.close()
