@@ -13,7 +13,6 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def extract_photo_id(url: str) -> str:
-    """Extracts unique numeric photo ID to deduplicate resolutions."""
     match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
     if match:
         return match.group(2)
@@ -35,7 +34,6 @@ def is_valid_post_photo(url: str) -> bool:
     return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
 
 def resolve_share_url(share_url: str) -> str:
-    """Short / Share URLs ko canonical desktop URL mein convert karta hai."""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -50,7 +48,7 @@ def extract_fb_media(target_url: str):
     videos_list = []
     seen_video_urls = set()
 
-    # Step 1: Canonical URL resolve karein
+    # Step 1: Resolve short link
     resolved_url = resolve_share_url(target_url)
     clean_target = resolved_url.replace("m.facebook.com", "www.facebook.com").replace("mbasic.facebook.com", "www.facebook.com")
 
@@ -65,19 +63,42 @@ def extract_fb_media(target_url: str):
                 "--disable-blink-features=AutomationControlled"
             ]
         )
+
+        # Anti-Bot Evasion Profile
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1440, "height": 900},
-            locale="en-US"
+            locale="en-US",
+            extra_http_headers={
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "sec-fetch-user": "?1",
+                "upgrade-insecure-requests": "1"
+            }
         )
+
+        # Optional: Add dummy or test Facebook cookie to bypass generic server auth blocks
+        # Agar aapke paas koi burner/dummy FB account hai to 'c_user' aur 'xs' cookie yahan daal sakte hain
+        fb_c_user = os.getenv("FB_C_USER", "")
+        fb_xs = os.getenv("FB_XS", "")
+        if fb_c_user and fb_xs:
+            context.add_cookies([
+                {"name": "c_user", "value": fb_c_user, "domain": ".facebook.com", "path": "/"},
+                {"name": "xs", "value": fb_xs, "domain": ".facebook.com", "path": "/"}
+            ])
+
         page = context.new_page()
 
         try:
-            # Step 2: Page Load
-            page.goto(clean_target, wait_until="domcontentloaded", timeout=35000)
-            time.sleep(3)
+            # Step 2: Navigate with full network idle wait
+            page.goto(clean_target, wait_until="domcontentloaded", timeout=40000)
+            time.sleep(3.5)
 
-            # Dismiss login/cookie modals if present
+            # Step 3: Handle login/cookie banners
             for sel in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
                 try:
                     btn = page.locator(sel).first
@@ -86,10 +107,10 @@ def extract_fb_media(target_url: str):
                 except Exception:
                     pass
 
-            # Step 3: Raw Full HTML Scan (Embedded JSON Data)
+            # Step 4: Extract JSON Blocks from script tags
             html_content = page.content()
 
-            # --- A. Video Extraction ---
+            # Video extraction
             video_patterns = [
                 (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD Video"),
                 (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD Video"),
@@ -104,12 +125,12 @@ def extract_fb_media(target_url: str):
                         seen_video_urls.add(clean_v)
                         videos_list.append({"url": clean_v, "type": "mp4", "quality": quality})
 
-            # --- B. Full Photo Album Extraction (Matches all 11+ High-Res Images) ---
-            # URI pattern inside FB relay store payload
-            uri_matches = re.findall(r'\"uri\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_content)
-            all_raw_photos = uri_matches if uri_matches else re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
+            # Photo extraction (Catches all high-resolution URLs)
+            raw_photos = re.findall(r'\"uri\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_content)
+            if not raw_photos:
+                raw_photos = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
 
-            for raw_u in all_raw_photos:
+            for raw_u in raw_photos:
                 clean = clean_fb_cdn_url(raw_u)
                 if is_valid_post_photo(clean):
                     pid = extract_photo_id(clean)
@@ -118,11 +139,10 @@ def extract_fb_media(target_url: str):
                             photos_dict[pid] = clean
                         else:
                             curr = photos_dict[pid]
-                            # Always keep the maximum resolution available
                             if ("ctp=s" in curr or "s590x590" in curr or "p320x320" in curr) and ("mx1170" in clean or "dst-jpg" in clean):
                                 photos_dict[pid] = clean
 
-            # --- C. Fallback: DOM Image Selector ---
+            # Step 5: DOM Fallback
             if not photos_dict and not videos_list:
                 for img in page.locator('img[src*="fbcdn.net"]').all():
                     try:
@@ -136,11 +156,10 @@ def extract_fb_media(target_url: str):
                         pass
 
         except Exception as e:
-            print(f"Extraction error: {e}")
+            print(f"Playwright extraction exception: {e}")
         finally:
             browser.close()
 
-    # Rule: Agar Photos hain to exact 11 photos return hongi, agar Video post hai to Video return hogi
     if photos_dict:
         return [{"url": u, "type": "jpg"} for u in photos_dict.values()]
 
