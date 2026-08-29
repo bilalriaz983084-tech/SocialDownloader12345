@@ -98,7 +98,7 @@ class QuietLogger:
 
 
 # =========================================================
-# RUNTIME DETECTIONS (CLEANED)
+# RUNTIME DETECTIONS
 # =========================================================
 
 def find_deno():
@@ -179,7 +179,7 @@ def remove_temp_file(filepath: str):
 
 
 # =========================================================
-# URL RESOLVER
+# URL RESOLVER (FOR INSTAGRAM / TIKTOK / YOUTUBE)
 # =========================================================
 
 def resolve_final_url(url: str):
@@ -189,12 +189,16 @@ def resolve_final_url(url: str):
             if match:
                 url = urllib.parse.unquote(match.group(1))
 
+        # Facebook share links ko requests ke zariye resolve nahi karna (auth wall issue)
+        if "facebook.com" in url or "fb.watch" in url:
+            return url
+
         session = requests.Session()
         response = session.get(
             url,
             headers=DESKTOP_HEADERS,
             allow_redirects=True,
-            timeout=20
+            timeout=15
         )
         return response.url or url
     except Exception as e:
@@ -290,18 +294,18 @@ def extract_instagram_all_slides(url: str):
 
 
 # =========================================================
-# FACEBOOK EXTRACTOR (Fixed for Audio & Photos)
+# FACEBOOK EXTRACTOR
 # =========================================================
 
 async def extract_facebook_media(url: str, is_audio: bool = False):
-    resolved_url = resolve_final_url(url)
-    print("Targeting Facebook URL:", resolved_url)
+    clean_target = url.strip()
+    print("Targeting Facebook URL:", clean_target)
 
     loop = asyncio.get_running_loop()
     raw_results = await loop.run_in_executor(
         executor,
         fb_scraper_extract,
-        resolved_url
+        clean_target
     )
 
     if raw_results and isinstance(raw_results, list) and len(raw_results) > 0:
@@ -324,6 +328,7 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
 
         return clean_items
 
+    # Fallback with yt-dlp
     try:
         options = get_ytdlp_runtime_options()
         options.update({
@@ -333,7 +338,7 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
             "format": "bestaudio/best" if is_audio else "best[ext=mp4]/best"
         })
         with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(resolved_url, download=False)
+            info = ydl.extract_info(clean_target, download=False)
             if info and info.get("url"):
                 return [{
                     "url": info["url"],
