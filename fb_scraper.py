@@ -1,6 +1,7 @@
 import os
 import re
 import html as html_lib
+import json
 import time
 from playwright.sync_api import sync_playwright
 
@@ -13,6 +14,7 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def extract_photo_id(url: str) -> str:
+    # Match CDN unique identifiers: /<num>_<PHOTO_ID>_<num>_
     match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
     if match:
         return match.group(2)
@@ -28,16 +30,16 @@ def is_valid_post_photo(url: str) -> bool:
     lower = url.lower()
     blocked = [
         "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
-        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", "safe_image.php", "profile", "cp1"
+        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", 
+        "safe_image.php", "profile", "cp1", "static.xx"
     ]
-    if any(b in lower for b in blocked):
-        return False
-    return "oh=" in url or "oe=" in url
+    return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
 
 def extract_fb_media(target_url: str):
     photos_dict = {}
 
     with sync_playwright() as p:
+        # Avoid --single-process as it crashes container renderers
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -45,50 +47,61 @@ def extract_fb_media(target_url: str):
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--single-process",
                 "--disable-blink-features=AutomationControlled"
             ]
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-            viewport={"width": 390, "height": 844},
-            locale="en-US",
-            extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1"
-            }
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1440, "height": 900},
+            locale="en-US"
         )
         page = context.new_page()
 
         try:
-            mobile_url = re.sub(r'https?://(www\.)?facebook\.com', 'https://m.facebook.com', target_url)
-            page.goto(mobile_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(3.5)
+            # 1. Desktop URL load karein taake login blocker na aaye
+            clean_url = target_url.replace("m.facebook.com", "www.facebook.com").replace("mbasic.facebook.com", "www.facebook.com")
+            page.goto(clean_url, wait_until="domcontentloaded", timeout=35000)
+            time.sleep(3)
 
-            # Thora sa scroll karein taake post images DOM mein fully render ho jayein
-            for _ in range(2):
-                page.keyboard.press("PageDown")
-                time.sleep(1.0)
-
-            # Sirf article / post body ke andar ki images uthayein
-            img_elements = page.locator('div[data-sigil="m-story-view"] img, article img, div[role="article"] img').all()
-            for img in img_elements:
+            # Close Cookie / Login Modals
+            for sel in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
                 try:
-                    src = img.get_attribute("src")
-                    if src and is_valid_post_photo(src):
-                        clean = clean_fb_cdn_url(src)
-                        pid = extract_photo_id(clean)
-                        if pid:
-                            if pid not in photos_dict:
-                                photos_dict[pid] = clean
-                        else:
-                            if clean not in photos_dict.values():
-                                photos_dict[len(photos_dict)] = clean
+                    btn = page.locator(sel).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(force=True)
                 except Exception:
                     pass
+
+            # 2. Extract Embedded JSON Script Tags (Facebook carries all 11+ photos here)
+            html_content = page.content()
+            
+            # Find all HD CDN image matches in script JSON blobs
+            raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
+            for raw_url in raw_matches:
+                clean = clean_fb_cdn_url(raw_url)
+                if is_valid_post_photo(clean):
+                    pid = extract_photo_id(clean)
+                    if pid:
+                        if pid not in photos_dict:
+                            photos_dict[pid] = clean
+                        else:
+                            curr = photos_dict[pid]
+                            # High resolution version ko retain karein
+                            if ("ctp=s" in curr or "s590x590" in curr or "p320x320" in curr) and ("mx1170" in clean or "dst-jpg" in clean):
+                                photos_dict[pid] = clean
+
+            # 3. Fallback to DOM elements if JSON extraction is empty
+            if not photos_dict:
+                for img in page.locator('img[src*="fbcdn.net"]').all():
+                    try:
+                        src = img.get_attribute("src")
+                        if src and is_valid_post_photo(src):
+                            clean = clean_fb_cdn_url(src)
+                            pid = extract_photo_id(clean)
+                            if pid:
+                                photos_dict[pid] = clean
+                    except Exception:
+                        pass
 
         except Exception as e:
             print(f"Scraper error: {e}")
