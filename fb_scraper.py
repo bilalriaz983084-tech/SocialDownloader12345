@@ -1,8 +1,6 @@
-import os
 import re
 import html as html_lib
-import time
-from playwright.sync_api import sync_playwright
+import requests
 
 def clean_fb_cdn_url(raw_url: str) -> str:
     if not raw_url:
@@ -32,67 +30,47 @@ def is_valid_post_photo(url: str) -> bool:
     ]
     if any(b in lower for b in blocked):
         return False
-    # Sirf wahi link uthayein jo asli post ki high-res image ke hon
-    return ("oh=" in url or "oe=" in url) and ("s720x720" in url or "s960x960" in url or "p720x720" in url or "p960x960" in url or "stp=" in url or "dst-jpg" in url or "tti" in lower or "oe=" in lower)
+    return "oh=" in url or "oe=" in url
 
 def extract_fb_media(target_url: str):
     photos_dict = {}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process",
-                "--disable-blink-features=AutomationControlled"
-            ]
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1440, "height": 900},
-            locale="en-US"
-        )
-        page = context.new_page()
+    try:
+        # Facebook mobile URL banayein taake asani se HTML mil sakay
+        mobile_url = re.sub(r'https?://(www\.)?facebook\.com', 'https://m.facebook.com', target_url)
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
 
-        try:
-            # Desktop version load karein kyunki usme high-res JSON payload mukammal hota hai
-            desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
-            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(3.0)
+        response = requests.get(mobile_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return []
 
-            # Thoda scroll karein taake lazy-load items trigger ho jayein
-            for _ in range(3):
-                page.keyboard.press("PageDown")
-                time.sleep(0.8)
+        html_content = response.text
 
-            # Poore page ke HTML source se saare fbcdn image links uthayein
-            html_content = page.content()
-            raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
-            
-            for raw_url in raw_matches:
-                clean = clean_fb_cdn_url(raw_url)
-                if is_valid_post_photo(clean):
-                    pid = extract_photo_id(clean)
-                    if pid:
-                        if pid not in photos_dict:
-                            photos_dict[pid] = clean
-                        else:
-                            # Agar pehle se choti image hai toh bari wali se replace kar dein
-                            curr = photos_dict[pid]
-                            if "s590x590" in curr or "p50x50" in curr:
-                                photos_dict[pid] = clean
-                    else:
-                        # Fallback agar PID na mile
-                        if clean not in photos_dict.values():
-                            photos_dict[len(photos_dict)] = clean
+        # Regex ke zariye saare fbcdn image links extract karein
+        raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
+        
+        for raw_url in raw_matches:
+            clean = clean_fb_cdn_url(raw_url)
+            if is_valid_post_photo(clean):
+                pid = extract_photo_id(clean)
+                if pid:
+                    if pid not in photos_dict:
+                        photos_dict[pid] = clean
+                else:
+                    if clean not in photos_dict.values():
+                        photos_dict[len(photos_dict)] = clean
 
-        except Exception as e:
-            print(f"Scraper error: {e}")
-        finally:
-            browser.close()
+    except Exception as e:
+        print(f"Scraper error: {e}")
 
     return [{"url": url, "type": "jpg"} for url in photos_dict.values()]
 
