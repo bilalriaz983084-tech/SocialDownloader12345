@@ -4,6 +4,7 @@ import sys
 import json
 import urllib.parse
 import requests
+from bs4 import BeautifulSoup
 
 def clean_fb_cdn_url(raw_url: str) -> str:
     if not raw_url:
@@ -31,51 +32,89 @@ def extract_fb_media(target_url: str):
     seen_urls = set()
     seen_ids = set()
 
-    # Step 1: Follow full redirects (for /share/p/ and fb.watch links)
-    session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    
+
+    session = requests.Session()
+
+    # Step 1: Follow full redirects
     try:
-        head_res = session.get(target_url, headers=headers, allow_redirects=True, timeout=15)
+        head_res = session.get(target_url, headers=headers, allow_redirects=True, timeout=12)
         resolved_url = head_res.url or target_url
     except Exception:
         resolved_url = target_url
 
-    desktop_url = resolved_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
+    # Step 2: Use mbasic endpoint (Bypasses Login Wall for Photos)
+    mbasic_url = resolved_url.replace("www.facebook.com", "mbasic.facebook.com").replace("m.facebook.com", "mbasic.facebook.com")
+    if "mbasic.facebook.com" not in mbasic_url:
+        mbasic_url = re.sub(r'https?://[^/]+', 'https://mbasic.facebook.com', resolved_url)
 
-    # Step 2: Direct HTML Parsing with Comprehensive Image Patterns
     try:
-        res = session.get(desktop_url, headers=headers, timeout=15)
+        res = session.get(mbasic_url, headers=headers, timeout=12)
         if res.status_code == 200:
-            content = res.text
+            soup = BeautifulSoup(res.text, "html.parser")
+            
+            # Find photo page links if this is a container post
+            photo_links = []
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if "/photo.php" in href or "/photos/" in href:
+                    full_link = urllib.parse.urljoin("https://mbasic.facebook.com", href)
+                    photo_links.append(full_link)
 
-            # 1. Video Check (HD / SD)
-            video_patterns = [
-                (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
-                (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
-                (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
-                (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
-            ]
-            for pattern, quality in video_patterns:
-                for raw_vid in re.findall(pattern, content):
-                    clean_vid = clean_fb_cdn_url(raw_vid)
-                    if clean_vid and clean_vid not in seen_urls:
-                        seen_urls.add(clean_vid)
-                        collected.append({"url": clean_vid, "type": "mp4", "quality": quality})
+            # If photo links found, extract full size from them
+            for plink in photo_links[:10]:
+                try:
+                    p_res = session.get(plink, headers=headers, timeout=8)
+                    if p_res.status_code == 200:
+                        p_soup = BeautifulSoup(p_res.text, "html.parser")
+                        for img in p_soup.find_all("img"):
+                            src = img.get("src", "")
+                            clean_img = clean_fb_cdn_url(src)
+                            if is_valid_post_photo(clean_img):
+                                match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
+                                uid = match.group(1) if match else clean_img.split("?")[0]
+                                if uid not in seen_ids:
+                                    seen_ids.add(uid)
+                                    collected.append({"url": clean_img, "type": "jpg"})
+                except Exception:
+                    continue
+
+            # Also check direct img tags on post page
+            if not collected:
+                for img in soup.find_all("img"):
+                    src = img.get("src", "")
+                    clean_img = clean_fb_cdn_url(src)
+                    if is_valid_post_photo(clean_img):
+                        match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
+                        uid = match.group(1) if match else clean_img.split("?")[0]
+                        if uid not in seen_ids:
+                            seen_ids.add(uid)
+                            collected.append({"url": clean_img, "type": "jpg"})
 
             if collected:
                 return collected
+    except Exception as e:
+        print("[FB MBasic Error]:", repr(e))
 
-            # 2. Comprehensive High-Quality Image Extractors
+    # Step 3: Desktop Regex Fallback (For single images/videos)
+    desktop_url = resolved_url.replace("mbasic.facebook.com", "www.facebook.com").replace("m.facebook.com", "www.facebook.com")
+    try:
+        desktop_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        }
+        res_desk = session.get(desktop_url, headers=desktop_headers, timeout=12)
+        if res_desk.status_code == 200:
+            content = res_desk.text
+
             image_patterns = [
                 r'\"full_size_image_url\":\s*\"(https:[^\"]+?)\"',
                 r'\"image\":\{\"uri\":\s*\"(https:[^\"]+?)\"',
-                r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"',
-                r'\"preferred_thumbnail\":\{\"image\":\{\"uri\":\s*\"(https:[^\"]+?)\"'
+                r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"'
             ]
 
             for pat in image_patterns:
@@ -91,47 +130,7 @@ def extract_fb_media(target_url: str):
             if collected:
                 return collected
     except Exception as e:
-        print("[FB HTTP Error]:", repr(e))
-
-    # Step 3: Playwright Fallback (For Dynamic JS / Heavy Protected Posts)
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            )
-            context = browser.new_context(user_agent=headers["User-Agent"])
-            page = context.new_page()
-
-            page.goto(desktop_url, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(3000)
-            content = page.content()
-
-            # Dialog dismiss
-            try:
-                close_btn = page.locator('div[role="dialog"] div[aria-label="Close"], div[aria-label="Decline optional cookies"]').first
-                if close_btn.count() > 0:
-                    close_btn.click(timeout=1500)
-            except Exception:
-                pass
-
-            # Check inside rendered DOM images
-            img_srcs = page.eval_on_selector_all('img', 'imgs => imgs.map(i => i.src)')
-            for src in img_srcs:
-                clean_img = clean_fb_cdn_url(src)
-                if is_valid_post_photo(clean_img):
-                    match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
-                    uid = match.group(1) if match else clean_img.split("?")[0]
-                    if uid not in seen_ids:
-                        seen_ids.add(uid)
-                        collected.append({"url": clean_img, "type": "jpg"})
-
-            context.close()
-            browser.close()
-    except Exception as e:
-        print("[FB Playwright Error]:", repr(e))
+        print("[FB Desktop Fallback Error]:", repr(e))
 
     return collected
 
