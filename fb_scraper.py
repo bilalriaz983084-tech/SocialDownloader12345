@@ -28,12 +28,11 @@ def is_valid_post_photo(url: str) -> bool:
     lower = url.lower()
     blocked = [
         "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
-        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", "safe_image.php", "profile"
+        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", "safe_image.php", "profile", "cp1"
     ]
-    # Strict check taake sirf post ki original media images hi select hon
     if any(b in lower for b in blocked):
         return False
-    return ("oh=" in url or "oe=" in url) and not ("p50x50" in lower or "p100x100" in lower)
+    return "oh=" in url or "oe=" in url
 
 def extract_fb_media(target_url: str):
     photos_dict = {}
@@ -60,28 +59,8 @@ def extract_fb_media(target_url: str):
             page.goto(mobile_url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(3.0)
 
-            # Scroll down to load post images into DOM
-            for _ in range(4):
-                page.keyboard.press("PageDown")
-                time.sleep(1.0)
-
-            html_content = page.content()
-            raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
-            for raw_url in raw_matches:
-                clean = clean_fb_cdn_url(raw_url)
-                if is_valid_post_photo(clean):
-                    pid = extract_photo_id(clean)
-                    if pid:
-                        if pid not in photos_dict:
-                            photos_dict[pid] = clean
-                        else:
-                            curr = photos_dict[pid]
-                            # Prefer higher quality version if duplicate exists
-                            if "s590x590" in curr or "p50x50" in curr:
-                                photos_dict[pid] = clean
-
-            # Fallback to specific image containers in mobile DOM
-            img_elements = page.locator('div[data-sigil="m-story-view"] img, article img').all()
+            # Sirf post ke andar mojood main images ko target karein (comments/icons ignore honge)
+            img_elements = page.locator('div[data-sigil="m-story-view"] img, article img, div[role="article"] img').all()
             for img in img_elements:
                 try:
                     src = img.get_attribute("src")
@@ -89,7 +68,13 @@ def extract_fb_media(target_url: str):
                         clean = clean_fb_cdn_url(src)
                         pid = extract_photo_id(clean)
                         if pid:
-                            photos_dict[pid] = clean
+                            # Agar choti resolution wali hai toh skip karein ya bari se replace karein
+                            if pid not in photos_dict:
+                                photos_dict[pid] = clean
+                        else:
+                            # Agar PID nahi milti lekin valid URL hai
+                            if clean not in photos_dict.values():
+                                photos_dict[len(photos_dict)] = clean
                 except Exception:
                     pass
 
