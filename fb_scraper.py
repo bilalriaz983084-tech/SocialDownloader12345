@@ -1,6 +1,7 @@
 import re
 import html as html_lib
-import requests
+import time
+from playwright.sync_api import sync_playwright
 
 def clean_fb_cdn_url(raw_url: str) -> str:
     if not raw_url:
@@ -10,68 +11,100 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     clean = clean.replace('&amp;', '&')
     return clean.strip("\"'<> ,\\")
 
-def extract_photo_id(url: str) -> str:
-    match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
-    if match:
-        return match.group(2)
-    fbid = re.search(r'fbid=([0-9]{10,25})', url)
-    if fbid:
-        return fbid.group(1)
-    digits = re.findall(r'[0-9]{13,22}', url)
-    return digits[0] if digits else ""
-
-def is_valid_post_photo(url: str) -> bool:
-    if not url or "fbcdn.net" not in url:
-        return False
-    lower = url.lower()
-    blocked = [
-        "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
-        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", "safe_image.php", "profile", "cp1"
-    ]
-    if any(b in lower for b in blocked):
-        return False
-    return "oh=" in url or "oe=" in url
-
 def extract_fb_media(target_url: str):
-    photos_dict = {}
+    image_urls = []
+    seen_ids = set()
 
-    try:
-        # Facebook mobile URL banayein taake asani se HTML mil sakay
-        mobile_url = re.sub(r'https?://(www\.)?facebook\.com', 'https://m.facebook.com', target_url)
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
-        }
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 900},
+            locale="en-US"
+        )
+        page = context.new_page()
 
-        response = requests.get(mobile_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return []
+        # Network responses intercept karne ka function
+        def handle_response(response):
+            try:
+                res_url = response.url
+                if "fbcdn.net/v/t39." in res_url and "oh=" in res_url:
+                    clean = clean_fb_cdn_url(res_url)
+                    if not any(ign in clean for ign in ["giphy", "emg1", "emoji", "rsrc", "cp0"]):
+                        photo_id_match = re.search(r'\/([0-9_]+)_[na]\.', clean)
+                        if photo_id_match:
+                            pid = photo_id_match.group(1)
+                            if pid not in seen_ids:
+                                seen_ids.add(pid)
+                                image_urls.append(clean)
+            except Exception:
+                pass
 
-        html_content = response.text
+        page.on("response", handle_response)
 
-        # Regex ke zariye saare fbcdn image links extract karein
-        raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
-        
-        for raw_url in raw_matches:
-            clean = clean_fb_cdn_url(raw_url)
-            if is_valid_post_photo(clean):
-                pid = extract_photo_id(clean)
-                if pid:
-                    if pid not in photos_dict:
-                        photos_dict[pid] = clean
-                else:
-                    if clean not in photos_dict.values():
-                        photos_dict[len(photos_dict)] = clean
+        try:
+            # Desktop URL load karein
+            desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
+            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)
 
-    except Exception as e:
-        print(f"Scraper error: {e}")
+            # Login/Cookie modal close karein agar aaye
+            try:
+                close_btn = page.query_selector('div[aria-label="Close"]')
+                if close_btn:
+                    close_btn.click()
+            except Exception:
+                pass
 
-    return [{"url": url, "type": "jpg"} for url in photos_dict.values()]
+            # Scroll down to load grid
+            page.mouse.wheel(0, 1000)
+            time.sleep(2)
+
+            # Pehli image par click karke Theater mode kholen
+            clickable_photos = page.query_selector_all('a[href*="/photo"], a[href*="photo.php"]')
+            if clickable_photos:
+                try:
+                    clickable_photos[0].click()
+                    time.sleep(2)
+                    
+                    # Right arrow key se ek ek karke saari images load karwayen
+                    for _ in range(15): 
+                        page.keyboard.press("ArrowRight")
+                        time.sleep(0.8)
+                except Exception:
+                    pass
+
+            # Fallback: HTML source se bhi check kar len
+            content = page.content()
+            cdn_matches = re.findall(r'https:\/\/[a-zA-Z0-9.\-_]*?\.fbcdn\.net\/v\/t39\.[0-9\-]+-6\/[^"\'\s<>\\]+', content)
+            for link in cdn_matches:
+                clean = clean_fb_cdn_url(link)
+                if any(ign in clean for ign in ["giphy.com", "emg1", "rsrc.php", "emoji.php", "cp0"]):
+                    continue
+                if "oh=" not in clean or "oe=" not in clean:
+                    continue
+                photo_id_match = re.search(r'\/([0-9_]+)_[na]\.', clean)
+                if photo_id_match:
+                    pid = photo_id_match.group(1)
+                    if pid not in seen_ids:
+                        seen_ids.add(pid)
+                        image_urls.append(clean)
+
+        except Exception as e:
+            print(f"Extraction exception: {e}")
+        finally:
+            browser.close()
+
+    return [{"url": url, "type": "jpg"} for url in image_urls]
 
 extract_all_fb_photos_sync = extract_fb_media
