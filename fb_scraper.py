@@ -14,6 +14,9 @@ HEADERS = {
     "Sec-Fetch-Dest": "document",
 }
 
+BROWSERLESS_API_KEY = os.environ.get("BROWSERLESS_API_KEY", "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af")
+
+
 def clean_fb_cdn_url(raw_url: str) -> str:
     if not raw_url:
         return ""
@@ -27,6 +30,7 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     clean = clean.replace(r'\u0026', '&').replace('&amp;', '&')
     return clean.strip("\"'<> ,\\")
 
+
 def is_valid_post_photo(url: str) -> bool:
     if not url or "fbcdn.net" not in url:
         return False
@@ -39,6 +43,7 @@ def is_valid_post_photo(url: str) -> bool:
         "t39.1997-6", "t39.1998-6", "100x100", "giphy", "emg1"
     ]
     return not any(b in lower for b in blocked) and url.startswith("https://") and ("oh=" in url and "oe=" in url)
+
 
 def parse_html_for_photos(html_text: str, seen_ids: set, collected: list):
     script_matches = re.findall(r'\"(?:image|photo_image|full_image|viewer_image)\":\s*\{\"uri\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_text)
@@ -56,12 +61,40 @@ def parse_html_for_photos(html_text: str, seen_ids: set, collected: list):
                 seen_ids.add(uid)
                 collected.append({"url": clean, "type": "jpg"})
 
-def extract_fb_media(target_url: str):
+
+def parse_html_for_videos(html_text: str, seen_urls: set, collected: list):
+    video_patterns = [
+        (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
+        (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
+        (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
+        (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD"),
+        (r'\"preferred_video_delivery_uri\":\s*\"(https:[^\"]+?)\"', "HD"),
+        (r'\"subtitled_video_uri\":\s*\"(https:[^\"]+?)\"', "SD")
+    ]
+
+    for pattern, quality in video_patterns:
+        matches = re.findall(pattern, html_text)
+        for raw_vid in matches:
+            clean_vid = clean_fb_cdn_url(raw_vid)
+            if clean_vid and "fbcdn.net" in clean_vid and clean_vid not in seen_urls and "bytestart" not in clean_vid:
+                seen_urls.add(clean_vid)
+                collected.append({
+                    "url": clean_vid,
+                    "type": "mp4",
+                    "quality": f"Facebook Video ({quality})"
+                })
+
+
+# =========================================================
+# 1. SEPARATE PHOTO EXTRACTOR
+# =========================================================
+def extract_fb_photos(target_url: str):
     collected = []
     seen_ids = set()
 
-    # Step 1: Direct Fast Fetch (www + mbasic)
     session = requests.Session()
+    resolved_url = target_url
+
     try:
         res = session.get(target_url, headers=HEADERS, allow_redirects=True, timeout=6)
         resolved_url = res.url or target_url
@@ -72,47 +105,22 @@ def extract_fb_media(target_url: str):
             m_res = session.get(m_url, headers=HEADERS, allow_redirects=True, timeout=6)
             parse_html_for_photos(m_res.text, seen_ids, collected)
     except Exception as e:
-        resolved_url = target_url
-        print("Direct fetch warning:", repr(e))
+        print("Direct photo fetch warning:", repr(e))
 
     if len(collected) >= 2:
         return collected
 
-    # Step 2: Browserless Cloud REST API (Vercel Friendly - No Playwright Local Process)
-    api_key = os.environ.get("BROWSERLESS_API_KEY", "2V9PPrLczaJ3bPxdca15920493ce5f1ff8d4201d5fe50a8af")
-    browserless_api = f"https://production-sfo.browserless.io/content?token={api_key}&stealth=true"
-
+    # Browserless Cloud REST API (Multi-photo & dynamic load fallback)
+    browserless_api = f"https://production-sfo.browserless.io/content?token={BROWSERLESS_API_KEY}&stealth=true"
     try:
-        payload = {
-            "url": resolved_url,
-            "waitForTimeout": 3000
-        }
+        payload = {"url": resolved_url, "waitForTimeout": 3000}
         b_res = requests.post(browserless_api, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
         if b_res.status_code == 200:
             parse_html_for_photos(b_res.text, seen_ids, collected)
-
-            # Agar photo na ho aur video post ho
-            if not collected:
-                video_patterns = [
-                    (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
-                    (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
-                    (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
-                    (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
-                ]
-                for pattern, quality in video_patterns:
-                    matches = re.findall(pattern, b_res.text)
-                    for raw_vid in matches:
-                        clean_vid = clean_fb_cdn_url(raw_vid)
-                        if clean_vid and "fbcdn.net" in clean_vid:
-                            return [{
-                                "url": clean_vid,
-                                "type": "mp4",
-                                "quality": f"Facebook Video ({quality})"
-                            }]
     except Exception as e:
-        print("Browserless REST API Error:", repr(e))
+        print("Browserless Photos Error:", repr(e))
 
-    # Step 3: OpenGraph Fallback
+    # OpenGraph Fallback
     if not collected and 'res' in locals() and res.text:
         og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', res.text)
         if og_match:
@@ -121,5 +129,56 @@ def extract_fb_media(target_url: str):
                 collected.append({"url": og_url, "type": "jpg"})
 
     return collected
+
+
+# =========================================================
+# 2. SEPARATE VIDEO EXTRACTOR
+# =========================================================
+def extract_fb_videos(target_url: str):
+    collected = []
+    seen_urls = set()
+
+    session = requests.Session()
+    resolved_url = target_url
+
+    try:
+        res = session.get(target_url, headers=HEADERS, allow_redirects=True, timeout=6)
+        resolved_url = res.url or target_url
+        parse_html_for_videos(res.text, seen_urls, collected)
+    except Exception as e:
+        print("Direct video fetch warning:", repr(e))
+
+    if collected:
+        return collected
+
+    # Browserless Cloud REST API (Reels & Watch Video fallback)
+    browserless_api = f"https://production-sfo.browserless.io/content?token={BROWSERLESS_API_KEY}&stealth=true"
+    try:
+        payload = {"url": resolved_url, "waitForTimeout": 3500}
+        b_res = requests.post(browserless_api, json=payload, headers={"Content-Type": "application/json"}, timeout=14)
+        if b_res.status_code == 200:
+            parse_html_for_videos(b_res.text, seen_urls, collected)
+    except Exception as e:
+        print("Browserless Video Error:", repr(e))
+
+    return collected
+
+
+# =========================================================
+# 3. COMBINED MEDIA EXTRACTOR (Used in main.py)
+# =========================================================
+def extract_fb_media(target_url: str):
+    # Step 1: Pehle strictly photos dhoondega
+    photos = extract_fb_photos(target_url)
+    if photos:
+        return photos
+
+    # Step 2: Agar photos na hon to video dhoondega
+    videos = extract_fb_videos(target_url)
+    if videos:
+        return videos
+
+    return []
+
 
 extract_all_fb_photos_sync = extract_fb_media
