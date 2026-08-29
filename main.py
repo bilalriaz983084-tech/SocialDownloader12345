@@ -12,22 +12,18 @@ import instaloader
 import yt_dlp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# =========================================================
-# SAFE IMPORT FOR FB SCRAPER
-# =========================================================
+# Safe Import for fb_scraper
 try:
     from fb_scraper import extract_fb_media as fb_scraper_extract
-except ImportError:
+except ImportError as err:
+    print("[WARNING] fb_scraper import error:", repr(err))
     def fb_scraper_extract(url: str):
         return []
 
-# =========================================================
-# APP & CORS SETUP
-# =========================================================
 app = FastAPI(title="Social Downloader Backend", version="20.0")
 
 app.add_middleware(
@@ -65,9 +61,6 @@ class QuietLogger:
     def warning(self, msg): pass
     def error(self, msg): pass
 
-# =========================================================
-# RUNTIME PATHS (DENO / NODE)
-# =========================================================
 def find_deno():
     candidates = [
         os.environ.get("DENO_PATH"),
@@ -108,18 +101,12 @@ def find_node():
 DENO_PATH = find_deno()
 NODE_PATH = find_node()
 
-print("======================================")
-print("yt-dlp version:", yt_dlp.version.__version__)
-print("Deno:", DENO_PATH if DENO_PATH else "NOT FOUND")
-print("Node:", NODE_PATH if NODE_PATH else "NOT FOUND")
-print("======================================")
-
 def get_ytdlp_runtime_options():
     options = {
         "http_headers": DESKTOP_HEADERS,
         "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
+        "retries": 3,
+        "fragment_retries": 3,
         "extractor_retries": 3,
         "file_access_retries": 3,
         "logger": QuietLogger(),
@@ -133,7 +120,6 @@ def get_ytdlp_runtime_options():
     }
     if DENO_PATH:
         options["js_runtimes"] = {"deno": {"path": DENO_PATH}}
-        options["remote_components"] = ["ejs:npm"]
     elif NODE_PATH:
         options["js_runtimes"] = {"node": {"path": NODE_PATH}}
     return options
@@ -154,14 +140,14 @@ def resolve_final_url(url: str):
             if match:
                 url = urllib.parse.unquote(match.group(1))
         session = requests.Session()
-        response = session.get(url, headers=DESKTOP_HEADERS, allow_redirects=True, timeout=20)
+        response = session.get(url, headers=DESKTOP_HEADERS, allow_redirects=True, timeout=15)
         return response.url or url
     except Exception as e:
         print("URL resolve warning:", repr(e))
         return url
 
 # =========================================================
-# PLATFORM HANDLERS
+# PLATFORM EXTRACTORS
 # =========================================================
 def extract_instagram_all_slides(url: str):
     media_items = []
@@ -186,7 +172,7 @@ def extract_instagram_all_slides(url: str):
             if media_items:
                 return media_items
     except Exception as e:
-        print("Instagram error:", repr(e))
+        print("Instagram instaloader warning:", repr(e))
 
     try:
         options = get_ytdlp_runtime_options()
@@ -204,20 +190,22 @@ def extract_instagram_all_slides(url: str):
                             "thumbnail": entry.get("thumbnail") or info.get("thumbnail")
                         })
     except Exception as e:
-        print("Instagram yt-dlp error:", repr(e))
+        print("Instagram yt-dlp warning:", repr(e))
 
     return media_items
 
 async def extract_facebook_media(url: str, is_audio: bool = False):
     resolved_url = resolve_final_url(url)
     print("Targeting Facebook URL:", resolved_url)
+    
+    # 1. Check direct video with yt-dlp first
     is_explicit_video = any(
         tag in resolved_url.lower()
         for tag in ["fb.watch", "/watch", "/videos/", "/reel/", "/reels/", "/share/v/", "/share/r/"]
     )
     if is_explicit_video or is_audio:
-        options = get_ytdlp_runtime_options()
         try:
+            options = get_ytdlp_runtime_options()
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(resolved_url, download=False)
                 if info:
@@ -235,19 +223,24 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
                     if info.get("url"):
                         return [{"url": info["url"], "type": "m4a" if is_audio else "mp4", "thumbnail": thumb}]
         except Exception as e:
-            print("Facebook yt-dlp error:", repr(e))
+            print("Facebook yt-dlp attempt failed:", repr(e))
 
-    loop = asyncio.get_running_loop()
-    raw_results = await loop.run_in_executor(executor, fb_scraper_extract, resolved_url)
-    if raw_results and isinstance(raw_results, list):
-        clean_items = []
-        seen = set()
-        for it in raw_results:
-            u = it.get("url")
-            if u and u not in seen:
-                seen.add(u)
-                clean_items.append(it)
-        return clean_items
+    # 2. Scraper fallback (Playwright for Photos/Carousel)
+    try:
+        loop = asyncio.get_running_loop()
+        raw_results = await loop.run_in_executor(executor, fb_scraper_extract, resolved_url)
+        if raw_results and isinstance(raw_results, list):
+            clean_items = []
+            seen = set()
+            for it in raw_results:
+                u = it.get("url")
+                if u and u not in seen:
+                    seen.add(u)
+                    clean_items.append(it)
+            return clean_items
+    except Exception as e:
+        print("Facebook Scraper Execution Error:", repr(e))
+
     return []
 
 def extract_tiktok_media(url: str, is_audio: bool = False):
@@ -307,7 +300,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
             target_heights = [1080, 720, 480, 360]
             available_heights = set(f.get("height") for f in formats_list if f.get("height") in target_heights)
 
-            base_endpoint = host_url.rstrip("/") if host_url else "http://127.0.0.1:8000"
+            base_endpoint = host_url.rstrip("/") if host_url else "http://127.0.0.1:8080"
             encoded_url = urllib.parse.quote(clean_url)
 
             for h in sorted(list(available_heights), reverse=True):
@@ -324,16 +317,15 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
         return []
 
 # =========================================================
-# ROUTES
+# ENDPOINTS
 # =========================================================
 @app.get("/")
+@app.get("/health")
 def root():
     return {
-        "status": "Social Downloader Backend Online",
-        "version": "20.0",
-        "yt_dlp": yt_dlp.version.__version__,
-        "deno": DENO_PATH or "NOT FOUND",
-        "node": NODE_PATH or "NOT FOUND"
+        "status": "healthy",
+        "service": "Social Downloader Backend",
+        "version": "20.0"
     }
 
 @app.get("/download")
@@ -403,7 +395,7 @@ async def extract_media(request: URLRequest, http_request: Request):
     elif "tiktok.com" in url_lower:
         platform = "TikTok"
         media_items = await loop.run_in_executor(executor, extract_tiktok_media, url, request.is_audio)
-    elif any(d in url_lower for d in ["youtube.com", "youtu.be"]):
+    elif any(d in url_lower for d in ["youtube.com", "youtu.be", "m.youtube.com"]):
         platform = "YouTube"
         media_items = await loop.run_in_executor(executor, extract_youtube, url, request.is_audio, host_url)
     else:
@@ -436,9 +428,6 @@ async def extract_media(request: URLRequest, http_request: Request):
         "formats": formats
     }
 
-# =========================================================
-# START SERVER
-# =========================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
