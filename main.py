@@ -98,48 +98,27 @@ class QuietLogger:
 
 
 # =========================================================
-# RUNTIME DETECTIONS (DENO & NODE)
+# RUNTIME DETECTIONS (CLEANED)
 # =========================================================
 
 def find_deno():
-    candidates = [
-        os.environ.get("DENO_PATH"),
-        os.environ.get("DENO"),
-        os.path.expanduser(r"~\.deno\bin\deno.exe"),
-        r"C:\Program Files\deno\deno.exe",
-        r"C:\Program Files (x86)\deno\deno.exe",
-    ]
     try:
         deno = shutil.which("deno")
-        if deno:
-            candidates.insert(0, deno)
+        if deno and os.path.isfile(deno):
+            return os.path.abspath(deno)
     except Exception:
         pass
-
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return os.path.abspath(path)
     return None
 
 DENO_PATH = find_deno()
 
 def find_node():
-    candidates = [
-        os.environ.get("NODE_PATH"),
-        os.environ.get("NODE"),
-        r"C:\Program Files\nodejs\node.exe",
-        r"C:\Program Files (x86)\nodejs\node.exe",
-    ]
     try:
         node = shutil.which("node")
-        if node:
-            candidates.insert(0, node)
+        if node and os.path.isfile(node):
+            return os.path.abspath(node)
     except Exception:
         pass
-
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return os.path.abspath(path)
     return None
 
 NODE_PATH = find_node()
@@ -673,7 +652,6 @@ async def extract_media(
         })
         media_urls.append(d_url)
 
-    # Resolve primary thumbnail cleanly
     first_thumb = ""
     for item in media_items:
         t = item.get("thumbnail")
