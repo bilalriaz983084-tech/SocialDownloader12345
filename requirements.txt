@@ -7,3 +7,4 @@ instaloader
 pydantic
 beautifulsoup4
 lxml
+playwright
