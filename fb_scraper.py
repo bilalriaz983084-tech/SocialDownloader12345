@@ -28,9 +28,12 @@ def is_valid_post_photo(url: str) -> bool:
     lower = url.lower()
     blocked = [
         "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
-        "p50x50", "p100x100", "p180x180", "safe_image.php", "profile"
+        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", "safe_image.php", "profile"
     ]
-    return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
+    # Strict check taake sirf post ki original media images hi select hon
+    if any(b in lower for b in blocked):
+        return False
+    return ("oh=" in url or "oe=" in url) and not ("p50x50" in lower or "p100x100" in lower)
 
 def extract_fb_media(target_url: str):
     photos_dict = {}
@@ -53,17 +56,15 @@ def extract_fb_media(target_url: str):
         page = context.new_page()
 
         try:
-            # Mobile version use karein taake login restriction bypass ho sakay
             mobile_url = re.sub(r'https?://(www\.)?facebook\.com', 'https://m.facebook.com', target_url)
             page.goto(mobile_url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(3.0)
 
-            # Scroll down to load all media elements into DOM
-            for _ in range(5):
+            # Scroll down to load post images into DOM
+            for _ in range(4):
                 page.keyboard.press("PageDown")
                 time.sleep(1.0)
 
-            # Extract from page content
             html_content = page.content()
             raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
             for raw_url in raw_matches:
@@ -75,11 +76,12 @@ def extract_fb_media(target_url: str):
                             photos_dict[pid] = clean
                         else:
                             curr = photos_dict[pid]
-                            if ("ctp=s" in curr or "s590x590" in curr) and ("mx1170" in clean or "stp=dst-jpg" in clean):
+                            # Prefer higher quality version if duplicate exists
+                            if "s590x590" in curr or "p50x50" in curr:
                                 photos_dict[pid] = clean
 
-            # Fallback photo elements search
-            img_elements = page.locator('img[src*="fbcdn.net"]').all()
+            # Fallback to specific image containers in mobile DOM
+            img_elements = page.locator('div[data-sigil="m-story-view"] img, article img').all()
             for img in img_elements:
                 try:
                     src = img.get_attribute("src")
