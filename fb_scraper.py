@@ -1,7 +1,7 @@
+import os
 import re
 import html as html_lib
 import time
-import requests
 from playwright.sync_api import sync_playwright
 
 def clean_fb_cdn_url(raw_url: str) -> str:
@@ -13,13 +13,14 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def extract_photo_id(url: str) -> str:
+    """Facebook CDN URL se unique photo ID nikalta hai taake duplicates filter ho sakein."""
+    # Pattern: /<num>_<PHOTO_ID>_<num>_[na].jpg
     match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
     if match:
         return match.group(2)
-    fbid = re.search(r'fbid=([0-9]{10,25})', url)
-    if fbid:
-        return fbid.group(1)
-    digits = re.findall(r'[0-9]{13,22}', url)
+    
+    # Fallback pattern for other FB CDN structures
+    digits = re.findall(r'[0-9]{12,20}', url)
     return digits[0] if digits else ""
 
 def is_valid_post_photo(url: str) -> bool:
@@ -28,29 +29,15 @@ def is_valid_post_photo(url: str) -> bool:
     lower = url.lower()
     blocked = [
         "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
-        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", 
-        "safe_image.php", "profile", "cp1", "static.xx"
+        "p50x50", "p100x100", "p180x180", "safe_image.php", "profile"
     ]
     return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
 
-def resolve_share_url(share_url: str) -> str:
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        }
-        res = requests.get(share_url, headers=headers, allow_redirects=True, timeout=10)
-        return res.url
-    except Exception:
-        return share_url
-
 def extract_fb_media(target_url: str):
-    photos_dict = {}
-    videos_list = []
-    seen_video_urls = set()
-
-    # Step 1: Resolve short link
-    resolved_url = resolve_share_url(target_url)
-    clean_target = resolved_url.replace("m.facebook.com", "www.facebook.com").replace("mbasic.facebook.com", "www.facebook.com")
+    # Dictionary use kar rahe hain: {photo_id: best_url}
+    photos_map = {}
+    seen_videos = set()
+    first_seen_id = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -59,112 +46,134 @@ def extract_fb_media(target_url: str):
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
                 "--disable-blink-features=AutomationControlled"
             ]
         )
-
-        # Anti-Bot Evasion Profile
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1440, "height": 900},
-            locale="en-US",
-            extra_http_headers={
-                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "sec-fetch-dest": "document",
-                "sec-fetch-mode": "navigate",
-                "sec-fetch-site": "none",
-                "sec-fetch-user": "?1",
-                "upgrade-insecure-requests": "1"
-            }
+            locale="en-US"
         )
-
-        # Optional: Add dummy or test Facebook cookie to bypass generic server auth blocks
-        # Agar aapke paas koi burner/dummy FB account hai to 'c_user' aur 'xs' cookie yahan daal sakte hain
-        fb_c_user = os.getenv("FB_C_USER", "")
-        fb_xs = os.getenv("FB_XS", "")
-        if fb_c_user and fb_xs:
-            context.add_cookies([
-                {"name": "c_user", "value": fb_c_user, "domain": ".facebook.com", "path": "/"},
-                {"name": "xs", "value": fb_xs, "domain": ".facebook.com", "path": "/"}
-            ])
-
         page = context.new_page()
 
-        try:
-            # Step 2: Navigate with full network idle wait
-            page.goto(clean_target, wait_until="domcontentloaded", timeout=40000)
-            time.sleep(3.5)
+        def save_photo_if_better(clean_url: str):
+            nonlocal first_seen_id
+            if not is_valid_post_photo(clean_url):
+                return
+            pid = extract_photo_id(clean_url)
+            if not pid:
+                return
 
-            # Step 3: Handle login/cookie banners
-            for sel in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
+            if first_seen_id is None:
+                first_seen_id = pid
+
+            # Agar photo pehli dafa aayi hai ya purani se behtar quality (non-crop/HD) hai to update karein
+            if pid not in photos_map:
+                photos_map[pid] = clean_url
+            else:
+                current_url = photos_map[pid]
+                # Agar mojooda URL chhota thumbnail hai aur nayi HD hai
+                if ("ctp=s" in current_url or "p320x320" in current_url) and ("cstp=mx" in clean_url or "stp=dst-jpg" in clean_url):
+                    photos_map[pid] = clean_url
+
+        # -------------------------------------------------------------
+        # 1. Listen to Real-Time Network Responses
+        # -------------------------------------------------------------
+        def handle_response(response):
+            try:
+                res_url = response.url
+                content_type = response.headers.get("content-type", "").lower()
+
+                # CDN Photos listener
+                if "fbcdn.net" in res_url and "oh=" in res_url:
+                    clean = clean_fb_cdn_url(res_url)
+                    save_photo_if_better(clean)
+
+                # Video MP4 Stream Listener
+                if ("video/mp4" in content_type or ".mp4" in res_url) and "fbcdn.net" in res_url:
+                    clean_v = clean_fb_cdn_url(res_url)
+                    if clean_v and clean_v not in seen_videos and "bytestart" not in clean_v:
+                        seen_videos.add(clean_v)
+            except Exception:
+                pass
+
+        page.on("response", handle_response)
+
+        try:
+            # -------------------------------------------------------------
+            # 2. Open Page & Dismiss Blockers
+            # -------------------------------------------------------------
+            desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
+            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+
+            # Close Login Modals / Cookies Banner
+            for selector in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
                 try:
-                    btn = page.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        btn.click(force=True)
+                    btn = page.locator(selector)
+                    if btn.count() > 0 and btn.first.is_visible():
+                        btn.first.click(force=True)
                 except Exception:
                     pass
 
-            # Step 4: Extract JSON Blocks from script tags
-            html_content = page.content()
+            # -------------------------------------------------------------
+            # 3. Open Theater Mode & Iterate Through Photos
+            # -------------------------------------------------------------
+            photo_link = page.locator('a[href*="/photo"], a[href*="photo.php"]').first
+            
+            if photo_link.count() > 0:
+                try:
+                    photo_link.click(force=True)
+                    time.sleep(2)
 
-            # Video extraction
-            video_patterns = [
-                (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD Video"),
-                (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD Video"),
-                (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD Video"),
-                (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD Video")
-            ]
-            for pattern, quality in video_patterns:
-                matches = re.findall(pattern, html_content)
-                for raw_vid in matches:
-                    clean_v = clean_fb_cdn_url(raw_vid)
-                    if clean_v and clean_v not in seen_video_urls and "fbcdn.net" in clean_v:
-                        seen_video_urls.add(clean_v)
-                        videos_list.append({"url": clean_v, "type": "mp4", "quality": quality})
+                    consecutive_no_change = 0
+                    last_count = 0
 
-            # Photo extraction (Catches all high-resolution URLs)
-            raw_photos = re.findall(r'\"uri\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_content)
-            if not raw_photos:
-                raw_photos = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
+                    for _ in range(25):
+                        # Current photo DOM image capture
+                        current_img = page.locator('div[data-visualcompletion="media-vc-image"] img, div[role="dialog"] img').first
+                        if current_img.count() > 0:
+                            src = current_img.get_attribute("src")
+                            if src:
+                                save_photo_if_better(clean_fb_cdn_url(src))
 
-            for raw_u in raw_photos:
-                clean = clean_fb_cdn_url(raw_u)
-                if is_valid_post_photo(clean):
-                    pid = extract_photo_id(clean)
-                    if pid:
-                        if pid not in photos_dict:
-                            photos_dict[pid] = clean
+                        # Next button click
+                        next_btn = page.locator('div[aria-label="Next photo"], div[aria-label="Next"], div[aria-label="See next image"]').first
+                        if next_btn.count() > 0 and next_btn.is_visible():
+                            next_btn.click(force=True)
                         else:
-                            curr = photos_dict[pid]
-                            if ("ctp=s" in curr or "s590x590" in curr or "p320x320" in curr) and ("mx1170" in clean or "dst-jpg" in clean):
-                                photos_dict[pid] = clean
+                            page.keyboard.press("ArrowRight")
+                        
+                        time.sleep(0.8)
 
-            # Step 5: DOM Fallback
-            if not photos_dict and not videos_list:
-                for img in page.locator('img[src*="fbcdn.net"]').all():
-                    try:
-                        src = img.get_attribute("src")
-                        if src and is_valid_post_photo(src):
-                            clean = clean_fb_cdn_url(src)
-                            pid = extract_photo_id(clean)
-                            if pid and pid not in photos_dict:
-                                photos_dict[pid] = clean
-                    except Exception:
-                        pass
+                        # Loop break condition: agar 3 dafa koi nayi unique photo na mile (end of album)
+                        if len(photos_map) == last_count:
+                            consecutive_no_change += 1
+                            if consecutive_no_change >= 3:
+                                break
+                        else:
+                            consecutive_no_change = 0
+                            last_count = len(photos_map)
+
+                except Exception as e:
+                    print(f"Theater iteration error: {e}")
 
         except Exception as e:
-            print(f"Playwright extraction exception: {e}")
+            print(f"Scraper error: {e}")
         finally:
             browser.close()
 
-    if photos_dict:
-        return [{"url": u, "type": "jpg"} for u in photos_dict.values()]
+    # Results Return
+    if photos_map:
+        return [{"url": url, "type": "jpg"} for url in photos_map.values()]
 
-    if videos_list:
-        return videos_list
+    if seen_videos:
+        first_video = list(seen_videos)[0]
+        return [{
+            "url": first_video,
+            "type": "mp4",
+            "quality": "HD Video" if "hd" in first_video.lower() else "SD Video"
+        }]
 
     return []
 
