@@ -290,7 +290,7 @@ def extract_instagram_all_slides(url: str):
 
 
 # =========================================================
-# FACEBOOK EXTRACTOR
+# FACEBOOK EXTRACTOR (Fixed for Audio & Photos)
 # =========================================================
 
 async def extract_facebook_media(url: str, is_audio: bool = False):
@@ -313,7 +313,13 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
                 seen.add(u)
                 clean_items.append(it)
 
-        if len(clean_items) > 1 and all(x.get("type") == "mp4" for x in clean_items):
+        if is_audio:
+            for item in clean_items:
+                if item.get("type") == "mp4":
+                    item["type"] = "m4a"
+                    item["quality"] = "Audio"
+
+        if len(clean_items) > 1 and all(x.get("type") in ["mp4", "m4a"] for x in clean_items):
             return [clean_items[0]]
 
         return clean_items
@@ -324,6 +330,7 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
             "skip_download": True,
             "ignoreerrors": True,
             "noplaylist": True,
+            "format": "bestaudio/best" if is_audio else "best[ext=mp4]/best"
         })
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(resolved_url, download=False)
@@ -331,7 +338,7 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
                 return [{
                     "url": info["url"],
                     "type": "m4a" if is_audio else "mp4",
-                    "quality": "Facebook HD Video" if not is_audio else "Audio",
+                    "quality": "Audio" if is_audio else "Facebook HD Video",
                     "thumbnail": info.get("thumbnail")
                 }]
     except Exception as e:
@@ -689,9 +696,9 @@ async def extract_media(
 
 
 # =========================================================
-# START SERVER (LOCAL TESTING)
+# START SERVER
 # =========================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="127.0.0.1", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
