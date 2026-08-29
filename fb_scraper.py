@@ -13,19 +13,18 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def extract_photo_id(url: str) -> str:
-    """Facebook CDN URL ya Page URL se unique numeric Photo ID extract karta hai."""
-    # Pattern 1: CDN filename pattern (e.g. /771909463_1625017112313549_...)
+    # 1. Standard FB CDN format (e.g. /771909463_1625017112313549_...)
     match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
     if match:
         return match.group(2)
-
-    # Pattern 2: fbid parameter
+    
+    # 2. Query param fbid
     fbid_match = re.search(r'fbid=([0-9]{10,25})', url)
     if fbid_match:
         return fbid_match.group(1)
 
-    # Pattern 3: Fallback digit string
-    digits = re.findall(r'[0-9]{13,20}', url)
+    # 3. Fallback digit sequence
+    digits = re.findall(r'[0-9]{13,22}', url)
     return digits[0] if digits else ""
 
 def is_valid_post_photo(url: str) -> bool:
@@ -33,7 +32,7 @@ def is_valid_post_photo(url: str) -> bool:
         return False
     lower = url.lower()
     blocked = [
-        "giphy", "emg1", "emoji", "rsrc.php", "cp0",
+        "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
         "p50x50", "p100x100", "p180x180", "safe_image.php", "profile"
     ]
     return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
@@ -52,40 +51,52 @@ def extract_fb_media(target_url: str):
                 "--disable-blink-features=AutomationControlled"
             ]
         )
+        
+        # Mobile viewport use karein taake login popup na aye aur photos easily scroll hon
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1440, "height": 900},
+            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+            viewport={"width": 430, "height": 932},
+            is_mobile=True,
+            has_touch=True,
             locale="en-US"
         )
         page = context.new_page()
 
-        def save_photo(clean_url: str, explicit_id: str = ""):
+        def save_photo(clean_url: str):
             if not is_valid_post_photo(clean_url):
                 return
-            pid = explicit_id or extract_photo_id(clean_url)
+            pid = extract_photo_id(clean_url)
             if not pid:
                 return
 
-            # Agar image pehle se mojood na ho ya nayi wali HD/non-thumbnail ho to save karein
             if pid not in photos_map:
                 photos_map[pid] = clean_url
             else:
                 curr = photos_map[pid]
-                if ("ctp=s" in curr or "p320x320" in curr) and ("cstp=mx" in clean_url or "stp=dst-jpg" in clean_url):
+                # High resolution version ko retain karein
+                if ("ctp=s" in curr or "s590x590" in curr or "p320x320" in curr) and ("mx1170" in clean_url or "cstp=mx" in clean_url or "dst-jpg" in clean_url):
                     photos_map[pid] = clean_url
 
-        # -------------------------------------------------------------
-        # 1. Real-Time Network Responses Listener
-        # -------------------------------------------------------------
         def handle_response(response):
             try:
                 res_url = response.url
                 content_type = response.headers.get("content-type", "").lower()
 
+                # Direct CDN response
                 if "fbcdn.net" in res_url and "oh=" in res_url:
-                    clean = clean_fb_cdn_url(res_url)
-                    save_photo(clean)
+                    save_photo(clean_fb_cdn_url(res_url))
 
+                # GraphQL payload mein chupi hui photos extract karna
+                if "graphql" in res_url or "application/json" in content_type:
+                    try:
+                        text_data = response.text()
+                        found = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', text_data)
+                        for u in found:
+                            save_photo(clean_fb_cdn_url(u))
+                    except Exception:
+                        pass
+
+                # Video Listener
                 if ("video/mp4" in content_type or ".mp4" in res_url) and "fbcdn.net" in res_url:
                     clean_v = clean_fb_cdn_url(res_url)
                     if clean_v and clean_v not in seen_videos and "bytestart" not in clean_v:
@@ -96,69 +107,57 @@ def extract_fb_media(target_url: str):
         page.on("response", handle_response)
 
         try:
-            # -------------------------------------------------------------
-            # 2. Page Navigation & Popups Clearance
-            # -------------------------------------------------------------
-            desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
-            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
+            # Facebook standard URL load karein
+            clean_url = target_url.replace("mbasic.", "").replace("m.", "")
+            page.goto(clean_url, wait_until="networkidle", timeout=35000)
             time.sleep(2)
 
-            for selector in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
+            # Close popup if any
+            for sel in ['div[aria-label="Close"]', 'div[role="button"]:has-text("Close")', '[aria-label="Decline optional cookies"]']:
                 try:
-                    btn = page.locator(selector)
+                    btn = page.locator(sel)
                     if btn.count() > 0 and btn.first.is_visible():
                         btn.first.click(force=True)
                 except Exception:
                     pass
 
-            # -------------------------------------------------------------
-            # 3. Open Theater Mode & Step Through Full Album
-            # -------------------------------------------------------------
-            photo_link = page.locator('a[href*="/photo"], a[href*="photo.php"]').first
-            
-            if photo_link.count() > 0:
+            # 1. Pehle DOM ke images save karein
+            for img in page.locator("img").all():
                 try:
-                    photo_link.click(force=True)
-                    time.sleep(2)
+                    src = img.get_attribute("src")
+                    if src:
+                        save_photo(clean_fb_cdn_url(src))
+                except Exception:
+                    pass
 
-                    seen_fbids = set()
+            # 2. Album / See More Photos pe click karein
+            more_btn = page.locator('a[href*="/photos/"], a[href*="album"], text=/\\+[0-9]+/').first
+            if more_btn.count() > 0 and more_btn.is_visible():
+                try:
+                    more_btn.click(force=True)
+                    time.sleep(2.5)
+                except Exception:
+                    pass
 
-                    # Album iterate loop
-                    for _ in range(30):
-                        # Active URL se Photo ID track karein
-                        current_url = page.url
-                        fbid_match = re.search(r'fbid=([0-9]+)', current_url) or re.search(r'/photo/([0-9]+)', current_url)
-                        current_fbid = fbid_match.group(1) if fbid_match else ""
+            # 3. Step-by-Step Horizontal & Vertical Scroll taake lazy loader trigger ho
+            for _ in range(12):
+                page.mouse.wheel(0, 800)
+                # Touch swipe simulation for carousel
+                page.touchscreen.tap(200, 400)
+                time.sleep(0.8)
 
-                        # Agar pehli photo dobara repeat ho aur kafi images collect ho chuki hon to loop break
-                        if current_fbid and current_fbid in seen_fbids and len(seen_fbids) >= 11:
-                            break
-
-                        if current_fbid:
-                            seen_fbids.add(current_fbid)
-
-                        # Dialog/Theater ke active img tags inspect karein
-                        active_imgs = page.locator('div[role="dialog"] img, div[data-visualcompletion="media-vc-image"] img').all()
-                        for img in active_imgs:
-                            try:
-                                src = img.get_attribute("src")
-                                if src:
-                                    save_photo(clean_fb_cdn_url(src), explicit_id=current_fbid)
-                            except Exception:
-                                pass
-
-                        # Next button click
-                        next_btn = page.locator('div[aria-label="Next photo"], div[aria-label="Next"], [aria-label="See next image"]').first
-                        if next_btn.count() > 0 and next_btn.is_visible():
-                            next_btn.click(force=True)
-                        else:
-                            page.keyboard.press("ArrowRight")
-
-                        # Image fetch & render buffer
-                        time.sleep(1.2)
-
-                except Exception as e:
-                    print(f"Theater iteration error: {e}")
+            # 4. Agar photo open hoti hai to swipe right karein
+            first_photo = page.locator('a[href*="/photo"], a[href*="photo.php"]').first
+            if first_photo.count() > 0:
+                try:
+                    first_photo.click(force=True)
+                    time.sleep(1.5)
+                    for _ in range(15):
+                        # Swipe / Arrow for mobile photo viewer
+                        page.keyboard.press("ArrowRight")
+                        time.sleep(0.8)
+                except Exception:
+                    pass
 
         except Exception as e:
             print(f"Scraper error: {e}")
