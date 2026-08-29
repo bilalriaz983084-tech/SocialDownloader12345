@@ -46,33 +46,24 @@ def extract_fb_media(target_url: str):
             ]
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1440, "height": 900},
+            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+            viewport={"width": 390, "height": 844},
             locale="en-US"
         )
         page = context.new_page()
 
         try:
-            # 1. Desktop URL load
-            desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
-            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(2.5)
-
-            # Close Cookie / Login Modals
-            for sel in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
-                try:
-                    btn = page.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        btn.click(force=True)
-                except Exception:
-                    pass
+            # Mobile version use karein taake login restriction bypass ho sakay
+            mobile_url = re.sub(r'https?://(www\.)?facebook\.com', 'https://m.facebook.com', target_url)
+            page.goto(mobile_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3.0)
 
             # Scroll down to load all media elements into DOM
-            for _ in range(4):
+            for _ in range(5):
                 page.keyboard.press("PageDown")
                 time.sleep(1.0)
 
-            # 2. Extract directly from Page Embedded JSON Scripts
+            # Extract from page content
             html_content = page.content()
             raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
             for raw_url in raw_matches:
@@ -87,31 +78,16 @@ def extract_fb_media(target_url: str):
                             if ("ctp=s" in curr or "s590x590" in curr) and ("mx1170" in clean or "stp=dst-jpg" in clean):
                                 photos_dict[pid] = clean
 
-            # 3. Theater Mode fallback to ensure all images are clicked and parsed
-            first_photo = page.locator('a[href*="/photo"], a[href*="photo.php"]').first
-            if first_photo.count() > 0:
+            # Fallback photo elements search
+            img_elements = page.locator('img[src*="fbcdn.net"]').all()
+            for img in img_elements:
                 try:
-                    first_photo.click(force=True)
-                    time.sleep(1.5)
-
-                    for _ in range(15):
-                        img_elem = page.locator('div[role="dialog"] img[src*="fbcdn.net"], div[data-visualcompletion="media-vc-image"] img').first
-                        if img_elem.count() > 0:
-                            src = img_elem.get_attribute("src")
-                            if src and is_valid_post_photo(src):
-                                clean = clean_fb_cdn_url(src)
-                                pid = extract_photo_id(clean)
-                                if pid:
-                                    photos_dict[pid] = clean
-
-                        # Click next photo
-                        next_btn = page.locator('div[aria-label="Next photo"], div[aria-label="Next"], [aria-label="See next image"]').first
-                        if next_btn.count() > 0 and next_btn.is_visible():
-                            next_btn.click(force=True)
-                        else:
-                            page.keyboard.press("ArrowRight")
-                        
-                        time.sleep(0.8)
+                    src = img.get_attribute("src")
+                    if src and is_valid_post_photo(src):
+                        clean = clean_fb_cdn_url(src)
+                        pid = extract_photo_id(clean)
+                        if pid:
+                            photos_dict[pid] = clean
                 except Exception:
                     pass
 
