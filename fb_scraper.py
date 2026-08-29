@@ -13,14 +13,19 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def extract_photo_id(url: str) -> str:
-    """Facebook CDN URL se unique photo ID nikalta hai taake duplicates filter ho sakein."""
-    # Pattern: /<num>_<PHOTO_ID>_<num>_[na].jpg
+    """Facebook CDN URL ya Page URL se unique numeric Photo ID extract karta hai."""
+    # Pattern 1: CDN filename pattern (e.g. /771909463_1625017112313549_...)
     match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
     if match:
         return match.group(2)
-    
-    # Fallback pattern for other FB CDN structures
-    digits = re.findall(r'[0-9]{12,20}', url)
+
+    # Pattern 2: fbid parameter
+    fbid_match = re.search(r'fbid=([0-9]{10,25})', url)
+    if fbid_match:
+        return fbid_match.group(1)
+
+    # Pattern 3: Fallback digit string
+    digits = re.findall(r'[0-9]{13,20}', url)
     return digits[0] if digits else ""
 
 def is_valid_post_photo(url: str) -> bool:
@@ -28,16 +33,14 @@ def is_valid_post_photo(url: str) -> bool:
         return False
     lower = url.lower()
     blocked = [
-        "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
+        "giphy", "emg1", "emoji", "rsrc.php", "cp0",
         "p50x50", "p100x100", "p180x180", "safe_image.php", "profile"
     ]
     return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
 
 def extract_fb_media(target_url: str):
-    # Dictionary use kar rahe hain: {photo_id: best_url}
     photos_map = {}
     seen_videos = set()
-    first_seen_id = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -56,40 +59,33 @@ def extract_fb_media(target_url: str):
         )
         page = context.new_page()
 
-        def save_photo_if_better(clean_url: str):
-            nonlocal first_seen_id
+        def save_photo(clean_url: str, explicit_id: str = ""):
             if not is_valid_post_photo(clean_url):
                 return
-            pid = extract_photo_id(clean_url)
+            pid = explicit_id or extract_photo_id(clean_url)
             if not pid:
                 return
 
-            if first_seen_id is None:
-                first_seen_id = pid
-
-            # Agar photo pehli dafa aayi hai ya purani se behtar quality (non-crop/HD) hai to update karein
+            # Agar image pehle se mojood na ho ya nayi wali HD/non-thumbnail ho to save karein
             if pid not in photos_map:
                 photos_map[pid] = clean_url
             else:
-                current_url = photos_map[pid]
-                # Agar mojooda URL chhota thumbnail hai aur nayi HD hai
-                if ("ctp=s" in current_url or "p320x320" in current_url) and ("cstp=mx" in clean_url or "stp=dst-jpg" in clean_url):
+                curr = photos_map[pid]
+                if ("ctp=s" in curr or "p320x320" in curr) and ("cstp=mx" in clean_url or "stp=dst-jpg" in clean_url):
                     photos_map[pid] = clean_url
 
         # -------------------------------------------------------------
-        # 1. Listen to Real-Time Network Responses
+        # 1. Real-Time Network Responses Listener
         # -------------------------------------------------------------
         def handle_response(response):
             try:
                 res_url = response.url
                 content_type = response.headers.get("content-type", "").lower()
 
-                # CDN Photos listener
                 if "fbcdn.net" in res_url and "oh=" in res_url:
                     clean = clean_fb_cdn_url(res_url)
-                    save_photo_if_better(clean)
+                    save_photo(clean)
 
-                # Video MP4 Stream Listener
                 if ("video/mp4" in content_type or ".mp4" in res_url) and "fbcdn.net" in res_url:
                     clean_v = clean_fb_cdn_url(res_url)
                     if clean_v and clean_v not in seen_videos and "bytestart" not in clean_v:
@@ -101,13 +97,12 @@ def extract_fb_media(target_url: str):
 
         try:
             # -------------------------------------------------------------
-            # 2. Open Page & Dismiss Blockers
+            # 2. Page Navigation & Popups Clearance
             # -------------------------------------------------------------
             desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
             page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(2)
 
-            # Close Login Modals / Cookies Banner
             for selector in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
                 try:
                     btn = page.locator(selector)
@@ -117,7 +112,7 @@ def extract_fb_media(target_url: str):
                     pass
 
             # -------------------------------------------------------------
-            # 3. Open Theater Mode & Iterate Through Photos
+            # 3. Open Theater Mode & Step Through Full Album
             # -------------------------------------------------------------
             photo_link = page.locator('a[href*="/photo"], a[href*="photo.php"]').first
             
@@ -126,34 +121,41 @@ def extract_fb_media(target_url: str):
                     photo_link.click(force=True)
                     time.sleep(2)
 
-                    consecutive_no_change = 0
-                    last_count = 0
+                    seen_fbids = set()
 
-                    for _ in range(25):
-                        # Current photo DOM image capture
-                        current_img = page.locator('div[data-visualcompletion="media-vc-image"] img, div[role="dialog"] img').first
-                        if current_img.count() > 0:
-                            src = current_img.get_attribute("src")
-                            if src:
-                                save_photo_if_better(clean_fb_cdn_url(src))
+                    # Album iterate loop
+                    for _ in range(30):
+                        # Active URL se Photo ID track karein
+                        current_url = page.url
+                        fbid_match = re.search(r'fbid=([0-9]+)', current_url) or re.search(r'/photo/([0-9]+)', current_url)
+                        current_fbid = fbid_match.group(1) if fbid_match else ""
+
+                        # Agar pehli photo dobara repeat ho aur kafi images collect ho chuki hon to loop break
+                        if current_fbid and current_fbid in seen_fbids and len(seen_fbids) >= 11:
+                            break
+
+                        if current_fbid:
+                            seen_fbids.add(current_fbid)
+
+                        # Dialog/Theater ke active img tags inspect karein
+                        active_imgs = page.locator('div[role="dialog"] img, div[data-visualcompletion="media-vc-image"] img').all()
+                        for img in active_imgs:
+                            try:
+                                src = img.get_attribute("src")
+                                if src:
+                                    save_photo(clean_fb_cdn_url(src), explicit_id=current_fbid)
+                            except Exception:
+                                pass
 
                         # Next button click
-                        next_btn = page.locator('div[aria-label="Next photo"], div[aria-label="Next"], div[aria-label="See next image"]').first
+                        next_btn = page.locator('div[aria-label="Next photo"], div[aria-label="Next"], [aria-label="See next image"]').first
                         if next_btn.count() > 0 and next_btn.is_visible():
                             next_btn.click(force=True)
                         else:
                             page.keyboard.press("ArrowRight")
-                        
-                        time.sleep(0.8)
 
-                        # Loop break condition: agar 3 dafa koi nayi unique photo na mile (end of album)
-                        if len(photos_map) == last_count:
-                            consecutive_no_change += 1
-                            if consecutive_no_change >= 3:
-                                break
-                        else:
-                            consecutive_no_change = 0
-                            last_count = len(photos_map)
+                        # Image fetch & render buffer
+                        time.sleep(1.2)
 
                 except Exception as e:
                     print(f"Theater iteration error: {e}")
