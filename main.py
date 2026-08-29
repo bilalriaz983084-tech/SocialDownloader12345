@@ -1,709 +1,135 @@
 import os
 import re
-import json
-import urllib.parse
-import asyncio
-import shutil
-import tempfile
-from concurrent.futures import ThreadPoolExecutor
-
-import requests
-import instaloader
-import yt_dlp
-import uvicorn
-
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-
-from fb_scraper import extract_fb_media as fb_scraper_extract
-
-
-# =========================================================
-# APP CONFIGURATION
-# =========================================================
-
-app = FastAPI(
-    title="Social Downloader Backend",
-    version="20.2"
-)
-
-
-# =========================================================
-# CORS MIDDLEWARE
-# =========================================================
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# =========================================================
-# HEADERS
-# =========================================================
-
-DESKTOP_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,"
-        "image/avif,image/webp,"
-        "*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Connection": "keep-alive",
-}
-
-
-# =========================================================
-# INSTALOADER INITIALIZATION
-# =========================================================
-
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    user_agent=DESKTOP_HEADERS["User-Agent"]
-)
-
-
-# =========================================================
-# REQUEST MODEL
-# =========================================================
-
-class URLRequest(BaseModel):
-    url: str
-    is_audio: bool = False
-
-
-# =========================================================
-# LOGGER
-# =========================================================
-
-class QuietLogger:
-    def debug(self, msg): pass
-    def warning(self, msg): pass
-    def error(self, msg): pass
-
-
-# =========================================================
-# RUNTIME DETECTIONS
-# =========================================================
-
-def find_deno():
-    try:
-        deno = shutil.which("deno")
-        if deno and os.path.isfile(deno):
-            return os.path.abspath(deno)
-    except Exception:
-        pass
-    return None
-
-DENO_PATH = find_deno()
-
-def find_node():
-    try:
-        node = shutil.which("node")
-        if node and os.path.isfile(node):
-            return os.path.abspath(node)
-    except Exception:
-        pass
-    return None
-
-NODE_PATH = find_node()
-
-
-# =========================================================
-# YT-DLP BASE OPTIONS
-# =========================================================
-
-def get_ytdlp_runtime_options():
-    options = {
-        "http_headers": DESKTOP_HEADERS,
-        "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
-        "extractor_retries": 3,
-        "file_access_retries": 3,
-        "logger": QuietLogger(),
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "continuedl": False,
-        "geo_bypass": True,
-        "nocheckcertificate": False,
-        "cachedir": False,
-        "skip_download": True,
-    }
-
-    if DENO_PATH:
-        options["js_runtimes"] = {
-            "deno": {
-                "path": DENO_PATH
-            }
-        }
-        options["remote_components"] = ["ejs:npm"]
-    elif NODE_PATH:
-        options["js_runtimes"] = {
-            "node": {
-                "path": NODE_PATH
-            }
-        }
-
-    return options
-
-
-# =========================================================
-# EXECUTOR & CLEANUP
-# =========================================================
-
-executor = ThreadPoolExecutor(max_workers=6)
-
-def remove_temp_file(filepath: str):
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-    except Exception as e:
-        print("Cleanup error:", repr(e))
-
-
-# =========================================================
-# URL RESOLVER (FOR INSTAGRAM / TIKTOK / YOUTUBE)
-# =========================================================
-
-def resolve_final_url(url: str):
-    try:
-        if "share_url=" in url:
-            match = re.search(r"share_url=([^&]+)", url)
-            if match:
-                url = urllib.parse.unquote(match.group(1))
-
-        # Facebook share links ko requests ke zariye resolve nahi karna (auth wall issue)
-        if "facebook.com" in url or "fb.watch" in url:
-            return url
-
-        session = requests.Session()
-        response = session.get(
-            url,
-            headers=DESKTOP_HEADERS,
-            allow_redirects=True,
-            timeout=15
-        )
-        return response.url or url
-    except Exception as e:
-        print("URL resolve warning:", repr(e))
-        return url
-
-
-# =========================================================
-# INSTAGRAM EXTRACTOR
-# =========================================================
-
-def extract_instagram_all_slides(url: str):
-    media_items = []
-    try:
-        shortcode = None
-        for tag in ["/p/", "/reel/", "/reels/"]:
-            if tag in url:
-                shortcode = (
-                    url.split(tag)[1]
-                    .split("/")[0]
-                    .split("?")[0]
-                )
-                break
-
-        if shortcode:
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-
-            if post.typename == "GraphSidecar":
-                for node in post.get_sidecar_nodes():
-                    if node.is_video and node.video_url:
-                        media_items.append({
-                            "url": node.video_url,
-                            "type": "mp4",
-                            "thumbnail": node.display_url or post.url
-                        })
-                    elif node.display_url:
-                        media_items.append({
-                            "url": node.display_url,
-                            "type": "jpg",
-                            "thumbnail": node.display_url
-                        })
-            elif post.is_video and post.video_url:
-                media_items.append({
-                    "url": post.video_url,
-                    "type": "mp4",
-                    "thumbnail": post.url
-                })
-            elif post.url:
-                media_items.append({
-                    "url": post.url,
-                    "type": "jpg",
-                    "thumbnail": post.url
-                })
-
-            if media_items:
-                return media_items
-
-    except Exception as e:
-        print("Instagram Instaloader error:", repr(e))
-
-    try:
-        options = get_ytdlp_runtime_options()
-        options.update({
-            "skip_download": True,
-            "ignoreerrors": True,
-            "noplaylist": True,
-        })
-
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if info:
-                if info.get("entries"):
-                    for entry in info["entries"]:
-                        if not entry:
-                            continue
-                        media_url = entry.get("url")
-                        if media_url:
-                            media_items.append({
-                                "url": media_url,
-                                "type": "mp4" if entry.get("ext") == "mp4" else "jpg",
-                                "thumbnail": entry.get("thumbnail") or info.get("thumbnail")
-                            })
-                elif info.get("url"):
-                    media_items.append({
-                        "url": info["url"],
-                        "type": "mp4" if info.get("ext") == "mp4" else "jpg",
-                        "thumbnail": info.get("thumbnail")
-                    })
-    except Exception as e:
-        print("Instagram yt-dlp error:", repr(e))
-
-    return media_items
-
-
-# =========================================================
-# FACEBOOK EXTRACTOR
-# =========================================================
-
-async def extract_facebook_media(url: str, is_audio: bool = False):
-    clean_target = url.strip()
-    print("Targeting Facebook URL:", clean_target)
-
-    loop = asyncio.get_running_loop()
-    raw_results = await loop.run_in_executor(
-        executor,
-        fb_scraper_extract,
-        clean_target
-    )
-
-    if raw_results and isinstance(raw_results, list) and len(raw_results) > 0:
-        clean_items = []
-        seen = set()
-        for it in raw_results:
-            u = it.get("url")
-            if u and u not in seen:
-                seen.add(u)
-                clean_items.append(it)
-
-        if is_audio:
-            for item in clean_items:
-                if item.get("type") == "mp4":
-                    item["type"] = "m4a"
-                    item["quality"] = "Audio"
-
-        if len(clean_items) > 1 and all(x.get("type") in ["mp4", "m4a"] for x in clean_items):
-            return [clean_items[0]]
-
-        return clean_items
-
-    # Fallback with yt-dlp
-    try:
-        options = get_ytdlp_runtime_options()
-        options.update({
-            "skip_download": True,
-            "ignoreerrors": True,
-            "noplaylist": True,
-            "format": "bestaudio/best" if is_audio else "best[ext=mp4]/best"
-        })
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(clean_target, download=False)
-            if info and info.get("url"):
-                return [{
-                    "url": info["url"],
-                    "type": "m4a" if is_audio else "mp4",
-                    "quality": "Audio" if is_audio else "Facebook HD Video",
-                    "thumbnail": info.get("thumbnail")
-                }]
-    except Exception as e:
-        print("Facebook yt-dlp fallback error:", repr(e))
-
-    return []
-
-
-# =========================================================
-# TIKTOK EXTRACTOR
-# =========================================================
-
-def extract_tiktok_media(url: str, is_audio: bool = False):
-    clean_input_url = url.strip()
-
-    try:
-        api_url = f"https://www.tikwm.com/api/?url={clean_input_url}&hd=1"
-        headers = {
-            "User-Agent": DESKTOP_HEADERS["User-Agent"],
-            "Referer": "https://www.tikwm.com/"
-        }
-        res = requests.get(api_url, headers=headers, timeout=20).json()
-
-        if res.get("code") == 0 and "data" in res:
-            data = res["data"]
-            cover_img = data.get("cover") or data.get("origin_cover") or data.get("dynamic_cover")
-
-            if "images" in data and isinstance(data["images"], list) and len(data["images"]) > 0:
-                media_items = []
-                for img_url in data["images"]:
-                    if img_url and isinstance(img_url, str):
-                        media_items.append({
-                            "url": img_url,
-                            "type": "jpg",
-                            "thumbnail": img_url
-                        })
-                if media_items:
-                    return media_items
-
-            if is_audio:
-                music_url = data.get("music") or data.get("music_info", {}).get("play")
-                if music_url:
-                    return [{
-                        "url": music_url,
-                        "type": "m4a",
-                        "thumbnail": cover_img
-                    }]
-
-            video_url = data.get("hdplay") or data.get("play") or data.get("wmplay")
-            if video_url:
-                return [{
-                    "url": video_url,
-                    "type": "mp4",
-                    "thumbnail": cover_img
-                }]
-    except Exception as e:
-        print("TikTok TikWM error:", repr(e))
-
-    return []
-
-
-# =========================================================
-# YOUTUBE API BACKEND
-# =========================================================
-
-def extract_youtube_api(video_id: str, is_audio: bool = False):
-    instances = [
-        "https://api.piped.privacydev.net",
-        "https://pipedapi.leptons.xyz",
-        "https://inv.tux.pizza",
-        "https://invidious.nerdvpn.de",
-        "https://vid.puffyan.us"
+import html as html_lib
+import time
+from playwright.sync_api import sync_playwright
+
+def clean_fb_cdn_url(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+    clean = str(raw_url).replace(r'\/', '/').replace(r'\u0026', '&')
+    clean = html_lib.unescape(clean)
+    clean = clean.replace('&amp;', '&')
+    return clean.strip("\"'<> ,\\")
+
+def extract_photo_id(url: str) -> str:
+    match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
+    if match:
+        return match.group(2)
+    fbid = re.search(r'fbid=([0-9]{10,25})', url)
+    if fbid:
+        return fbid.group(1)
+    digits = re.findall(r'[0-9]{12,22}', url)
+    return digits[0] if digits else ""
+
+def is_valid_post_photo(url: str) -> bool:
+    if not url or "fbcdn.net" not in url:
+        return False
+    lower = url.lower()
+    blocked = [
+        "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
+        "p50x50", "p100x100", "p180x180", "s150x150", "s32x32", "s40x40", "s50x50", 
+        "safe_image.php", "profile", "cp1", "static.xx"
     ]
+    return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
 
-    for base in instances:
+def extract_fb_media(target_url: str):
+    photos_dict = {}
+    videos_list = []
+    seen_video_urls = set()
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            viewport={"width": 1440, "height": 900},
+            locale="en-US"
+        )
+        page = context.new_page()
+
         try:
-            if "piped" in base:
-                api_url = f"{base}/streams/{video_id}"
-                res = requests.get(api_url, headers=DESKTOP_HEADERS, timeout=4)
-                if res.status_code == 200:
-                    data = res.json()
-                    thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+            # 1. Direct target load
+            clean_url = target_url.replace("m.facebook.com", "www.facebook.com").replace("mbasic.facebook.com", "www.facebook.com")
+            page.goto(clean_url, wait_until="load", timeout=40000)
+            time.sleep(4)
 
-                    if is_audio:
-                        audio_streams = data.get("audioStreams", [])
-                        if audio_streams:
-                            return [{
-                                "url": audio_streams[0].get("url"),
-                                "type": "m4a",
-                                "quality": f"Audio ({audio_streams[0].get('bitrate', 128)}kbps)",
-                                "thumbnail": thumb
-                            }]
+            # Close popups
+            for sel in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]', '[aria-label="Decline optional cookies"]']:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(force=True)
+                except Exception:
+                    pass
 
-                    results = []
-                    seen_h = set()
-                    streams = data.get("videoStreams", [])
+            # 2. Extract Videos
+            html_content = page.content()
+            video_patterns = [
+                (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD Video"),
+                (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD Video"),
+                (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD Video"),
+                (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD Video")
+            ]
+            for pattern, quality in video_patterns:
+                matches = re.findall(pattern, html_content)
+                for raw_vid in matches:
+                    clean_v = clean_fb_cdn_url(raw_vid)
+                    if clean_v and clean_v not in seen_video_urls and "fbcdn.net" in clean_v:
+                        seen_video_urls.add(clean_v)
+                        videos_list.append({"url": clean_v, "type": "mp4", "quality": quality})
 
-                    for s in streams:
-                        url = s.get("url")
-                        quality_str = str(s.get("quality", ""))
-                        height = s.get("height")
-                        h_val = height if height else (int(re.sub(r"\D", "", quality_str)) if re.sub(r"\D", "", quality_str) else None)
+            # 3. Extract JSON Image URIs
+            raw_photos = re.findall(r'\"uri\":\s*\"(https:[^\"]+?fbcdn\.net[^\"]+?)\"', html_content)
+            if not raw_photos:
+                raw_photos = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
 
-                        if url and h_val in [1080, 720, 480, 360]:
-                            if h_val not in seen_h:
-                                seen_h.add(h_val)
-                                results.append({
-                                    "url": url,
-                                    "type": "mp4",
-                                    "quality": f"{h_val}p Full HD" if h_val == 1080 else f"{h_val}p HD" if h_val >= 720 else f"{h_val}p",
-                                    "thumbnail": thumb
-                                })
+            for raw_u in raw_photos:
+                clean = clean_fb_cdn_url(raw_u)
+                if is_valid_post_photo(clean):
+                    pid = extract_photo_id(clean)
+                    if pid:
+                        if pid not in photos_dict:
+                            photos_dict[pid] = clean
+                        else:
+                            curr = photos_dict[pid]
+                            if ("ctp=s" in curr or "s590x590" in curr or "p320x320" in curr) and ("mx1170" in clean or "dst-jpg" in clean):
+                                photos_dict[pid] = clean
 
-                    if results:
-                        return sorted(results, key=lambda x: int(re.sub(r"\D", "", x["quality"].split()[0])), reverse=True)
-            else:
-                api_url = f"{base}/api/v1/videos/{video_id}"
-                res = requests.get(api_url, headers=DESKTOP_HEADERS, timeout=4)
-                if res.status_code == 200:
-                    data = res.json()
-                    thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+            # 4. Fallback: Scroll once & take visible images
+            if not photos_dict and not videos_list:
+                page.mouse.wheel(0, 500)
+                time.sleep(1.5)
+                for img in page.locator('img[src*="fbcdn.net"]').all():
+                    try:
+                        src = img.get_attribute("src")
+                        if src and is_valid_post_photo(src):
+                            clean = clean_fb_cdn_url(src)
+                            pid = extract_photo_id(clean)
+                            if pid and pid not in photos_dict:
+                                photos_dict[pid] = clean
+                    except Exception:
+                        pass
 
-                    if is_audio:
-                        for f in data.get("adaptiveFormats", []):
-                            if f.get("type", "").startswith("audio") and f.get("url"):
-                                return [{
-                                    "url": f["url"],
-                                    "type": "m4a",
-                                    "quality": "Audio (128kbps)",
-                                    "thumbnail": thumb
-                                }]
+        except Exception as e:
+            print(f"[ERROR] FB Scraper Exception: {e}")
+        finally:
+            browser.close()
 
-                    results = []
-                    seen_h = set()
-                    all_formats = data.get("formatStreams", []) + data.get("adaptiveFormats", [])
-                    for f in all_formats:
-                        h = re.sub(r"\D", "", f.get("resolution", "") or f.get("qualityLabel", ""))
-                        if h.isdigit() and int(h) in [1080, 720, 480, 360]:
-                            val = int(h)
-                            if val not in seen_h and f.get("url"):
-                                seen_h.add(val)
-                                results.append({
-                                    "url": f["url"],
-                                    "type": "mp4",
-                                    "quality": f"{val}p Full HD" if val == 1080 else f"{val}p HD" if val >= 720 else f"{val}p",
-                                    "thumbnail": thumb
-                                })
+    if photos_dict:
+        return [{"url": u, "type": "jpg"} for u in photos_dict.values()]
 
-                    if results:
-                        return sorted(results, key=lambda x: int(re.sub(r"\D", "", x["quality"].split()[0])), reverse=True)
-
-        except Exception:
-            continue
+    if videos_list:
+        return videos_list
 
     return []
 
-
-# =========================================================
-# YOUTUBE MAIN EXTRACTOR
-# =========================================================
-
-def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
-    clean_url = url.strip()
-    match = re.search(r"(?:v=|\/|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})", clean_url)
-    video_id = match.group(1) if match else None
-
-    clean_thumb = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else ""
-
-    if video_id:
-        clean_url = f"https://www.youtube.com/watch?v={video_id}"
-        api_results = extract_youtube_api(video_id, is_audio)
-        if api_results:
-            return api_results
-
-    options = get_ytdlp_runtime_options()
-
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(clean_url, download=False)
-
-        if not info:
-            return []
-
-        results = []
-        raw_thumb = info.get("thumbnail") or clean_thumb
-        if ".webp" in raw_thumb:
-            raw_thumb = raw_thumb.replace(".webp", ".jpg").replace("vi_webp", "vi")
-
-        formats_list = info.get("formats", [])
-
-        if is_audio:
-            for f in reversed(formats_list):
-                f_url = f.get("url")
-                if f_url and f_url.startswith("http") and f.get("acodec") != "none" and f.get("vcodec") == "none":
-                    abr = int(f.get("abr", 128)) if f.get("abr") else 128
-                    return [{
-                        "url": f_url,
-                        "type": "m4a",
-                        "quality": f"Audio ({abr}kbps)",
-                        "thumbnail": raw_thumb
-                    }]
-
-        for f in formats_list:
-            f_url = f.get("url")
-            if f_url and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("ext") == "mp4":
-                h = f.get("height")
-                if h and h in [1080, 720, 480, 360]:
-                    results.append({
-                        "url": f_url,
-                        "type": "mp4",
-                        "quality": f"{h}p Full HD" if h == 1080 else f"{h}p HD" if h >= 720 else f"{h}p",
-                        "thumbnail": raw_thumb
-                    })
-
-        return results
-
-    except Exception as e:
-        print("[ERROR] YouTube extraction error:", repr(e))
-        return []
-
-
-# =========================================================
-# ROOT
-# =========================================================
-
-@app.get("/")
-def root():
-    return {
-        "status": "Social Downloader Backend Online",
-        "version": "20.2",
-        "yt_dlp": yt_dlp.version.__version__,
-        "deno": DENO_PATH if DENO_PATH else "NOT FOUND",
-        "node": NODE_PATH if NODE_PATH else "NOT FOUND",
-        "downloadMode": "DIRECT & MERGED STREAM"
-    }
-
-
-# =========================================================
-# MAIN EXTRACT ROUTE
-# =========================================================
-
-@app.post("/extract")
-async def extract_media(
-    request: URLRequest,
-    http_request: Request
-):
-    url = request.url.strip()
-
-    if not url:
-        raise HTTPException(
-            status_code=400,
-            detail="URL cannot be empty"
-        )
-
-    media_items = []
-    platform = "Social Media"
-    url_lower = url.lower()
-    host_url = str(http_request.base_url)
-
-    try:
-        if "instagram.com" in url_lower:
-            platform = "Instagram"
-            media_items = extract_instagram_all_slides(url)
-        elif "facebook.com" in url_lower or "fb.watch" in url_lower:
-            platform = "Facebook"
-            media_items = await extract_facebook_media(url, request.is_audio)
-        elif "tiktok.com" in url_lower:
-            platform = "TikTok"
-            media_items = extract_tiktok_media(url, request.is_audio)
-        elif any(domain in url_lower for domain in ["youtube.com", "youtu.be", "m.youtube.com"]):
-            platform = "YouTube"
-            media_items = extract_youtube(url, request.is_audio, host_url)
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported platform. Please use YouTube, Instagram, Facebook or TikTok."
-            )
-    except Exception as e:
-        print("Extraction Exception:", repr(e))
-        media_items = []
-
-    if not media_items:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unable to extract media from {platform}. Link may be private or restricted."
-        )
-
-    formats = []
-    media_urls = []
-
-    for idx, item in enumerate(media_items):
-        d_url = item.get("url")
-        if not d_url:
-            continue
-
-        item_type = item.get("type", "mp4")
-        quality = item.get("quality")
-
-        if request.is_audio:
-            extension = item_type if item_type in ["mp3", "m4a"] else "m4a"
-        else:
-            extension = item_type
-
-        if not quality:
-            if len(media_items) > 1:
-                quality = f"Photo {idx + 1}" if extension in ["jpg", "jpeg", "png"] else f"Item {idx + 1}"
-            elif extension == "mp4":
-                quality = "HD Video"
-            elif extension in ["jpg", "jpeg", "png"]:
-                quality = "HD Image"
-            elif extension in ["mp3", "m4a"]:
-                quality = "Audio"
-
-        formats.append({
-            "quality": quality,
-            "downloadUrl": d_url,
-            "extension": extension
-        })
-        media_urls.append(d_url)
-
-    first_thumb = ""
-    for item in media_items:
-        t = item.get("thumbnail")
-        if t and str(t).startswith("http") and not str(t).endswith(".mp4"):
-            first_thumb = t
-            break
-
-    if not first_thumb:
-        for fmt in formats:
-            if fmt.get("extension") in ["jpg", "jpeg", "png"]:
-                first_thumb = fmt["downloadUrl"]
-                break
-
-    if not first_thumb:
-        first_thumb = "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&q=80"
-
-    is_carousel_album = (
-        len(formats) > 1
-        and any(f.get("extension") in ["jpg", "jpeg", "png"] for f in formats)
-    )
-
-    return {
-        "status": "success",
-        "title": f"{platform}_Download",
-        "thumbnail": first_thumb,
-        "sourcePlatform": platform,
-        "total": len(formats),
-        "media_urls": media_urls,
-        "formats": formats,
-        "serverStorage": False,
-        "downloadMode": "direct",
-        "fixedQuality": "HD" if is_carousel_album else None,
-        "isCarousel": is_carousel_album
-    }
-
-
-# =========================================================
-# START SERVER
-# =========================================================
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+extract_all_fb_photos_sync = extract_fb_media
