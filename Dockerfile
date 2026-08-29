@@ -2,10 +2,12 @@ FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
 
 WORKDIR /app
 
-# System dependencies for media & yt-dlp
+# Install FFmpeg, Node.js (for yt-dlp JS runtime), and Curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
