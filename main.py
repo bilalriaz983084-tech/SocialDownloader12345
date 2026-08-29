@@ -12,7 +12,7 @@ import instaloader
 import yt_dlp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -38,7 +38,7 @@ DESKTOP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -105,10 +105,17 @@ def get_ytdlp_runtime_options():
     options = {
         "http_headers": DESKTOP_HEADERS,
         "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 5,
+        "fragment_retries": 5,
         "extractor_retries": 3,
         "file_access_retries": 3,
+        "extractor_args": {
+            "youtube": {
+                # Android client server/datacenter IPs par bot check bypass karta hai
+                "player_client": ["android", "web"],
+                "skip": ["hls", "dash"]
+            }
+        },
         "logger": QuietLogger(),
         "quiet": True,
         "no_warnings": True,
@@ -120,6 +127,7 @@ def get_ytdlp_runtime_options():
     }
     if DENO_PATH:
         options["js_runtimes"] = {"deno": {"path": DENO_PATH}}
+        options["remote_components"] = ["ejs:npm"]
     elif NODE_PATH:
         options["js_runtimes"] = {"node": {"path": NODE_PATH}}
     return options
@@ -198,7 +206,7 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
     resolved_url = resolve_final_url(url)
     print("Targeting Facebook URL:", resolved_url)
     
-    # 1. Check direct video with yt-dlp first
+    # 1. Direct video extractor
     is_explicit_video = any(
         tag in resolved_url.lower()
         for tag in ["fb.watch", "/watch", "/videos/", "/reel/", "/reels/", "/share/v/", "/share/r/"]
@@ -225,7 +233,7 @@ async def extract_facebook_media(url: str, is_audio: bool = False):
         except Exception as e:
             print("Facebook yt-dlp attempt failed:", repr(e))
 
-    # 2. Scraper fallback (Playwright for Photos/Carousel)
+    # 2. Scraper fallback (Photos, Carousel, Share Links)
     try:
         loop = asyncio.get_running_loop()
         raw_results = await loop.run_in_executor(executor, fb_scraper_extract, resolved_url)
@@ -395,7 +403,7 @@ async def extract_media(request: URLRequest, http_request: Request):
     elif "tiktok.com" in url_lower:
         platform = "TikTok"
         media_items = await loop.run_in_executor(executor, extract_tiktok_media, url, request.is_audio)
-    elif any(d in url_lower for d in ["youtube.com", "youtu.be", "m.youtube.com"]):
+    elif any(d in url_lower for d in ["youtube.com", "youtu.be"]):
         platform = "YouTube"
         media_items = await loop.run_in_executor(executor, extract_youtube, url, request.is_audio, host_url)
     else:
