@@ -1,8 +1,8 @@
 import os
 import re
+import json
 import urllib.parse
 import requests
-from bs4 import BeautifulSoup
 
 def clean_fb_cdn_url(raw_url: str) -> str:
     if not raw_url:
@@ -31,95 +31,101 @@ def extract_fb_media(target_url: str):
     seen_ids = set()
 
     session = requests.Session()
-    
-    # Facebook Bot User-Agent (Facebook bot ko login page nahi dikhata, direct meta tags deta hai)
-    bot_headers = {
-        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-    }
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document"
+    })
 
-    # Standard Mobile Browser Headers
-    mobile_headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    # Step 1: Resolve short link (/share/p/ -> actual permalink)
+    # 1. Resolve redirect to get the true Facebook URL
+    resolved_url = target_url
     try:
-        head_res = session.get(target_url, headers=mobile_headers, allow_redirects=True, timeout=10)
-        resolved_url = head_res.url or target_url
-    except Exception:
-        resolved_url = target_url
-
-    # Step 2: OpenGraph Extraction (Bypasses Login 100%)
-    try:
-        res = session.get(resolved_url, headers=bot_headers, timeout=10)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # Check og:image (Full resolution original photo)
-            for meta in soup.find_all("meta"):
-                prop = meta.get("property", "").lower()
-                name = meta.get("name", "").lower()
-                if prop in ["og:image", "og:image:url", "og:image:secure_url"] or name in ["twitter:image", "thumbnail"]:
-                    img_url = clean_fb_cdn_url(meta.get("content", ""))
-                    if is_valid_post_photo(img_url) and img_url not in seen_urls:
-                        seen_urls.add(img_url)
-                        collected.append({"url": img_url, "type": "jpg", "thumbnail": img_url})
-
-            if collected:
-                return collected
+        r = session.get(target_url, allow_redirects=True, timeout=12)
+        resolved_url = r.url or target_url
     except Exception as e:
-        print("[FB Bot Scraper Error]:", repr(e))
+        print("[FB Resolve Warning]:", repr(e))
 
-    # Step 3: Mobile JSON / HTML Stream Fallback (For Carousels / Albums)
-    m_url = resolved_url.replace("www.facebook.com", "m.facebook.com").replace("mbasic.facebook.com", "m.facebook.com")
+    print(f"[FB Engine] Resolved URL: {resolved_url}")
+
+    # 2. Extract Post ID / Fbid from URL
+    post_id = None
+    patterns = [
+        r'/posts/([0-9]+)',
+        r'/photos/[^/]+/([0-9]+)',
+        r'fbid=([0-9]+)',
+        r'story_fbid=([0-9]+)',
+        r'/permalink/([0-9]+)',
+        r'/p/([a-zA-Z0-9_-]+)'
+    ]
+    for p in patterns:
+        m = re.search(p, resolved_url)
+        if m:
+            post_id = m.group(1)
+            break
+
+    # 3. Direct HTML / Script Blob Scanner
     try:
-        res_m = session.get(m_url, headers=mobile_headers, timeout=12)
-        if res_m.status_code == 200:
-            content = res_m.text
-            
-            # Video fallback
-            video_patterns = [
-                (r'\"playable_url_quality_hd\":\s*\"(https:[^\"]+?)\"', "HD"),
-                (r'\"browser_native_hd_url\":\s*\"(https:[^\"]+?)\"', "HD"),
-                (r'\"playable_url\":\s*\"(https:[^\"]+?)\"', "SD"),
-                (r'\"browser_native_sd_url\":\s*\"(https:[^\"]+?)\"', "SD")
-            ]
-            for pattern, quality in video_patterns:
-                for raw_vid in re.findall(pattern, content):
-                    clean_vid = clean_fb_cdn_url(raw_vid)
-                    if clean_vid and clean_vid not in seen_urls:
-                        seen_urls.add(clean_vid)
-                        collected.append({"url": clean_vid, "type": "mp4", "quality": quality, "thumbnail": ""})
+        res = session.get(resolved_url, timeout=15)
+        content = res.text
 
-            if collected:
-                return collected
+        # 3a. High Quality Photo Matchers in JSON script payloads
+        img_regexes = [
+            r'\"image\":\{\"uri\":\"(https:[^\"]+?)\"',
+            r'\"full_size_image_url\":\"(https:[^\"]+?)\"',
+            r'\"preferred_thumbnail\":\{\"image\":\{\"uri\":\"(https:[^\"]+?)\"',
+            r'\"uri\":\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"',
+            r'\"large_share_image\":\{\"uri\":\"(https:[^\"]+?)\"',
+            r'<meta property=\"og:image\" content=\"(https:[^\"]+?)\"'
+        ]
 
-            # High-Res Image JSON patterns
-            image_patterns = [
-                r'\"full_size_image_url\":\s*\"(https:[^\"]+?)\"',
-                r'\"image\":\{\"uri\":\s*\"(https:[^\"]+?)\"',
-                r'\"uri\":\s*\"(https:[^\"]+?scontent[^\"]+?fbcdn\.net[^\"]+?)\"',
-                r'\"preferred_thumbnail\":\{\"image\":\{\"uri\":\s*\"(https:[^\"]+?)\"'
-            ]
+        for reg in img_regexes:
+            matches = re.findall(reg, content)
+            for raw_u in matches:
+                clean_u = clean_fb_cdn_url(raw_u)
+                if is_valid_post_photo(clean_u) and clean_u not in seen_urls:
+                    seen_urls.add(clean_u)
+                    collected.append({
+                        "url": clean_u,
+                        "type": "jpg",
+                        "thumbnail": clean_u
+                    })
 
-            for pat in image_patterns:
-                for uri in re.findall(pat, content):
-                    clean_img = clean_fb_cdn_url(uri)
-                    if is_valid_post_photo(clean_img):
-                        match = re.search(r'/([0-9]{8,25})_[0-9]+_[0-9]+', clean_img)
-                        uid = match.group(1) if match else clean_img.split("?")[0]
-                        if uid not in seen_ids:
-                            seen_ids.add(uid)
-                            collected.append({"url": clean_img, "type": "jpg", "thumbnail": clean_img})
+        if collected:
+            print(f"[FB Engine] Found {len(collected)} items via HTML payload")
+            return collected
 
-            if collected:
-                return collected
     except Exception as e:
-        print("[FB Mobile Fallback Error]:", repr(e))
+        print("[FB HTML Scan Error]:", repr(e))
+
+    # 4. Mobile Endpoint Fallback (m.facebook.com)
+    try:
+        mobile_url = resolved_url.replace("www.facebook.com", "m.facebook.com")
+        mob_headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        }
+        res_mob = session.get(mobile_url, headers=mob_headers, timeout=12)
+        mob_text = res_mob.text
+
+        for raw_u in re.findall(r'\"(https://[^\"]+?fbcdn\.net[^\"]+?)\"', mob_text):
+            clean_u = clean_fb_cdn_url(raw_u)
+            if is_valid_post_photo(clean_u) and clean_u not in seen_urls:
+                seen_urls.add(clean_u)
+                collected.append({
+                    "url": clean_u,
+                    "type": "jpg",
+                    "thumbnail": clean_u
+                })
+
+        if collected:
+            print(f"[FB Engine] Found {len(collected)} items via Mobile Endpoint")
+            return collected
+
+    except Exception as e:
+        print("[FB Mobile Error]:", repr(e))
 
     return collected
 
