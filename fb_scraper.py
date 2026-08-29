@@ -13,6 +13,7 @@ def clean_fb_cdn_url(raw_url: str) -> str:
     return clean.strip("\"'<> ,\\")
 
 def extract_photo_id(url: str) -> str:
+    # Match standard FB photo identifiers
     match = re.search(r'/([0-9]+)_([0-9]{10,25})_[0-9]+_', url)
     if match:
         return match.group(2)
@@ -26,7 +27,10 @@ def is_valid_post_photo(url: str) -> bool:
     if not url or "fbcdn.net" not in url:
         return False
     lower = url.lower()
-    blocked = ["giphy", "emg1", "emoji", "rsrc", "cp0", "p50x50", "p100x100", "p180x180", "safe_image", "profile"]
+    blocked = [
+        "giphy", "emg1", "emoji", "rsrc.php", "cp0", 
+        "p50x50", "p100x100", "p180x180", "safe_image.php", "profile"
+    ]
     return not any(b in lower for b in blocked) and ("oh=" in url or "oe=" in url)
 
 def extract_fb_media(target_url: str):
@@ -38,69 +42,78 @@ def extract_fb_media(target_url: str):
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage"
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled"
             ]
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1440, "height": 900},
             locale="en-US"
         )
         page = context.new_page()
 
         try:
-            # 1. Direct mbasic URL banayein taake login blocker na aaye
-            mbasic_url = re.sub(r'https?://(www\.|m\.)?facebook\.com', 'https://mbasic.facebook.com', target_url)
-            page.goto(mbasic_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(1.5)
+            # 1. Desktop URL load
+            desktop_url = re.sub(r'https?://(m|mbasic)\.facebook\.com', 'https://www.facebook.com', target_url)
+            page.goto(desktop_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2.5)
 
-            # 2. Check karein agar direct Album / "See All Photos" ka link mojood hai
-            album_links = page.locator('a[href*="/media/set/"], a[href*="photos"], a[href*="album.php"]').all()
-            if album_links:
-                album_links[0].click()
-                time.sleep(1.5)
+            # Close Cookie / Login Modals
+            for sel in ['div[aria-label="Close"]', 'div[aria-label="close"]', 'div[data-testid="cookie-policy-manage-dialog-accept-button"]']:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(force=True)
+                except Exception:
+                    pass
 
-            # 3. Post ke andar jitne photo detail pages ke links hain unko collect karein
-            photo_page_links = []
-            for link in page.locator('a[href*="photo.php"], a[href*="/photos/"]').all():
-                href = link.get_attribute("href")
-                if href and ("fbid=" in href or "/photos/" in href) and href not in photo_page_links:
-                    if href.startswith("/"):
-                        href = "https://mbasic.facebook.com" + href
-                    photo_page_links.append(href)
-
-            # Agar photo page links mil gaye (Album Mode)
-            if photo_page_links:
-                for link in photo_page_links:
-                    try:
-                        page.goto(link, wait_until="domcontentloaded", timeout=15000)
-                        # Har photo page par Full Size / View Full Size ka link hota hai
-                        full_size_link = page.locator('a[href*="fbcdn.net"], a:has-text("View full size"), a:has-text("View Full Size")').first
-                        
-                        img_url = ""
-                        if full_size_link.count() > 0:
-                            img_url = full_size_link.get_attribute("href")
-                        
-                        if not img_url:
-                            img = page.locator('img[src*="fbcdn.net"]').first
-                            if img.count() > 0:
-                                img_url = img.get_attribute("src")
-
-                        if img_url and is_valid_post_photo(img_url):
-                            clean = clean_fb_cdn_url(img_url)
-                            pid = extract_photo_id(clean) or extract_photo_id(link)
-                            if pid:
+            # 2. Extract directly from Page Embedded JSON Scripts (Contains all 11 photos payload)
+            html_content = page.content()
+            raw_matches = re.findall(r'(https:[^"\'\s]+?fbcdn\.net[^"\'\s]+?(?:jpg|png|webp)[^"\'\s]*)', html_content)
+            for raw_url in raw_matches:
+                clean = clean_fb_cdn_url(raw_url)
+                if is_valid_post_photo(clean):
+                    pid = extract_photo_id(clean)
+                    if pid:
+                        if pid not in photos_dict:
+                            photos_dict[pid] = clean
+                        else:
+                            curr = photos_dict[pid]
+                            if ("ctp=s" in curr or "s590x590" in curr) and ("mx1170" in clean or "stp=dst-jpg" in clean):
                                 photos_dict[pid] = clean
+
+            # 3. Agar images 11 se kam hon to Theater Mode se slide karein
+            if len(photos_dict) < 11:
+                first_photo = page.locator('a[href*="/photo"], a[href*="photo.php"]').first
+                if first_photo.count() > 0:
+                    try:
+                        first_photo.click(force=True)
+                        time.sleep(1.5)
+
+                        for _ in range(15):
+                            img_elem = page.locator('div[role="dialog"] img[src*="fbcdn.net"], div[data-visualcompletion="media-vc-image"] img').first
+                            if img_elem.count() > 0:
+                                src = img_elem.get_attribute("src")
+                                if src and is_valid_post_photo(src):
+                                    clean = clean_fb_cdn_url(src)
+                                    pid = extract_photo_id(clean)
+                                    if pid:
+                                        photos_dict[pid] = clean
+
+                            # Click next photo
+                            next_btn = page.locator('div[aria-label="Next photo"], div[aria-label="Next"], [aria-label="See next image"]').first
+                            if next_btn.count() > 0 and next_btn.is_visible():
+                                next_btn.click(force=True)
+                            else:
+                                page.keyboard.press("ArrowRight")
+                            
+                            time.sleep(0.8)
+
+                            if len(photos_dict) >= 11:
+                                break
                     except Exception:
                         pass
-            else:
-                # 4. Fallback: Standard Post View se saari images uthana
-                for img in page.locator('img[src*="fbcdn.net"]').all():
-                    src = img.get_attribute("src")
-                    if src and is_valid_post_photo(src):
-                        clean = clean_fb_cdn_url(src)
-                        pid = extract_photo_id(clean)
-                        if pid:
-                            photos_dict[pid] = clean
 
         except Exception as e:
             print(f"Scraper error: {e}")
