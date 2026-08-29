@@ -26,7 +26,7 @@ except ImportError:
         return []
 
 # =========================================================
-# APP & CORS
+# APP & CORS SETUP
 # =========================================================
 app = FastAPI(title="Social Downloader Backend", version="20.0")
 
@@ -38,9 +38,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================================================
-# HEADERS & SESSIONS
-# =========================================================
 DESKTOP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -49,8 +46,6 @@ DESKTOP_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
     "Connection": "keep-alive",
 }
 
@@ -58,7 +53,7 @@ L = instaloader.Instaloader(
     download_pictures=False,
     download_videos=False,
     download_video_thumbnails=False,
-    user_agent=DESKTOP_HEADERS["User-Agent"],
+    user_agent=DESKTOP_HEADERS["User-Agent"]
 )
 
 class URLRequest(BaseModel):
@@ -71,7 +66,7 @@ class QuietLogger:
     def error(self, msg): pass
 
 # =========================================================
-# RUNTIME DETECTORS
+# RUNTIME PATHS (DENO / NODE)
 # =========================================================
 def find_deno():
     candidates = [
@@ -84,7 +79,7 @@ def find_deno():
     try:
         deno = shutil.which("deno")
         if deno:
-            candidates.insert(0, deno)
+            return deno
     except Exception:
         pass
     for path in candidates:
@@ -102,7 +97,7 @@ def find_node():
     try:
         node = shutil.which("node")
         if node:
-            candidates.insert(0, node)
+            return node
     except Exception:
         pass
     for path in candidates:
@@ -131,12 +126,9 @@ def get_ytdlp_runtime_options():
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "continuedl": False,
         "geo_bypass": True,
-        "nocheckcertificate": False,
         "cachedir": False,
         "windowsfilenames": True,
-        "restrictfilenames": False,
         "skip_download": True,
     }
     if DENO_PATH:
@@ -169,7 +161,7 @@ def resolve_final_url(url: str):
         return url
 
 # =========================================================
-# PLATFORM EXTRACTORS
+# PLATFORM HANDLERS
 # =========================================================
 def extract_instagram_all_slides(url: str):
     media_items = []
@@ -218,6 +210,7 @@ def extract_instagram_all_slides(url: str):
 
 async def extract_facebook_media(url: str, is_audio: bool = False):
     resolved_url = resolve_final_url(url)
+    print("Targeting Facebook URL:", resolved_url)
     is_explicit_video = any(
         tag in resolved_url.lower()
         for tag in ["fb.watch", "/watch", "/videos/", "/reel/", "/reels/", "/share/v/", "/share/r/"]
@@ -331,7 +324,7 @@ def extract_youtube(url: str, is_audio: bool = False, host_url: str = ""):
         return []
 
 # =========================================================
-# API ROUTES
+# ROUTES
 # =========================================================
 @app.get("/")
 def root():
@@ -339,8 +332,8 @@ def root():
         "status": "Social Downloader Backend Online",
         "version": "20.0",
         "yt_dlp": yt_dlp.version.__version__,
-        "deno": DENO_PATH if DENO_PATH else "NOT FOUND",
-        "node": NODE_PATH if NODE_PATH else "NOT FOUND",
+        "deno": DENO_PATH or "NOT FOUND",
+        "node": NODE_PATH or "NOT FOUND"
     }
 
 @app.get("/download")
@@ -410,7 +403,7 @@ async def extract_media(request: URLRequest, http_request: Request):
     elif "tiktok.com" in url_lower:
         platform = "TikTok"
         media_items = await loop.run_in_executor(executor, extract_tiktok_media, url, request.is_audio)
-    elif any(domain in url_lower for domain in ["youtube.com", "youtu.be", "m.youtube.com"]):
+    elif any(d in url_lower for d in ["youtube.com", "youtu.be"]):
         platform = "YouTube"
         media_items = await loop.run_in_executor(executor, extract_youtube, url, request.is_audio, host_url)
     else:
@@ -423,49 +416,15 @@ async def extract_media(request: URLRequest, http_request: Request):
     media_urls = []
     for idx, item in enumerate(media_items):
         d_url = item.get("url")
-        if not d_url:
-            continue
-        item_type = item.get("type", "mp4")
-        quality = item.get("quality")
-        if request.is_audio:
-            extension = item_type if item_type in ["mp3", "m4a"] else "m4a"
-        else:
-            extension = item_type
-
-        if not quality:
-            if len(media_items) > 1:
-                quality = f"Item {idx + 1}"
-            elif extension == "mp4":
-                quality = "HD Video"
-            elif extension == "jpg":
-                quality = "HD Image"
-            elif extension in ["mp3", "m4a"]:
-                quality = "Audio"
-
-        formats.append({"quality": quality, "downloadUrl": d_url, "extension": extension})
+        if not d_url: continue
+        
+        ext = item.get("type", "mp4")
+        quality = item.get("quality") or ("HD Video" if ext == "mp4" else "Image")
+        
+        formats.append({"quality": quality, "downloadUrl": d_url, "extension": ext})
         media_urls.append(d_url)
 
-    if not formats:
-        raise HTTPException(status_code=404, detail="Media was found but no valid download URL was returned.")
-
-    first_thumb = ""
-    for item in media_items:
-        t = item.get("thumbnail")
-        if t and str(t).startswith("http") and not str(t).endswith(".mp4"):
-            first_thumb = t
-            break
-
-    if first_thumb and ".webp" in first_thumb:
-        first_thumb = first_thumb.replace(".webp", ".jpg").replace("vi_webp", "vi")
-
-    if not first_thumb:
-        for fmt in formats:
-            if fmt["extension"] in ["jpg", "jpeg", "png"]:
-                first_thumb = fmt["downloadUrl"]
-                break
-
-    if not first_thumb:
-        first_thumb = formats[0]["downloadUrl"]
+    first_thumb = next((i["thumbnail"] for i in media_items if i.get("thumbnail")), "")
 
     return {
         "status": "success",
@@ -474,8 +433,12 @@ async def extract_media(request: URLRequest, http_request: Request):
         "sourcePlatform": platform,
         "total": len(formats),
         "media_urls": media_urls,
-        "formats": formats,
+        "formats": formats
     }
 
+# =========================================================
+# START SERVER
+# =========================================================
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
